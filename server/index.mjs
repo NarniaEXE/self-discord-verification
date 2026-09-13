@@ -10,6 +10,7 @@ import {
 import {
   startDiscordBot,
   handleDiscordVerificationSuccess,
+  handleDiscordVerificationFailure,
 } from "./src/discordBot.mjs";
 import { resolveShortUrl } from "./src/urlShortener.mjs";
 
@@ -222,6 +223,25 @@ app.post("/api/verify", async (req, res) => {
         isMinimumAgeValid,
         isOfacValid,
       });
+
+      try {
+        const parsed = decodeUserDefinedDataHex(result.userData?.userDefinedData);
+        if (
+          parsed &&
+          parsed.kind === "discord-self-verification" &&
+          parsed.sessionId
+        ) {
+          await handleDiscordVerificationFailure(parsed.sessionId, reason);
+        }
+      } catch (parseError) {
+        logEvent(
+          "verification.userdata_parse_error_failure",
+          "Failed to parse userDefinedData on failure",
+          {
+            error: parseError instanceof Error ? parseError.message : String(parseError),
+          },
+        );
+      }
 
       return res.status(200).json({
         status: "error",
