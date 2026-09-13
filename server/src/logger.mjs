@@ -9,6 +9,7 @@ const rootDir = path.join(__dirname, "..");
 const logsDir = path.join(rootDir, "logs");
 fs.mkdirSync(logsDir, { recursive: true });
 const logFilePath = path.join(logsDir, "discord-verifier.log");
+export const LOG_FILE_PATH = logFilePath;
 
 export function logEvent(type, message, extra = {}) {
   const timestamp = new Date().toISOString();
