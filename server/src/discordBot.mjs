@@ -46,6 +46,10 @@ fs.mkdirSync(qrOutputDir, { recursive: true });
 const pendingVerifications = new Map();
 let discordClient = null;
 
+export function getDiscordClient() {
+  return discordClient;
+}
+
 async function createSelfVerificationLink(sessionId, discordUser, generateQr = true, isMobile = false) {
   if (!SELF_ENDPOINT) {
     throw new Error("SELF_ENDPOINT must be configured");
