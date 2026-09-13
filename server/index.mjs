@@ -220,15 +220,18 @@ app.post("/api/verify", async (req, res) => {
         reason = "User is in OFAC sanctions list";
       }
 
+      const parsed = decodeUserDefinedDataHex(result.userData?.userDefinedData);
+
       logEvent("verification.failed", "Self verification failed", {
         attestationId: result.attestationId,
         isValid,
         isMinimumAgeValid,
         isOfacValid,
+        discordUserId: parsed?.discordUserId,
+        guildId: parsed?.guildId,
       });
 
       try {
-        const parsed = decodeUserDefinedDataHex(result.userData?.userDefinedData);
         if (
           parsed &&
           parsed.kind === "discord-self-verification" &&
@@ -254,18 +257,21 @@ app.post("/api/verify", async (req, res) => {
       });
     }
 
+    const parsedSuccess = decodeUserDefinedDataHex(result.userData?.userDefinedData);
+
     logEvent("verification.succeeded", "Self verification succeeded", {
       attestationId: result.attestationId,
+      discordUserId: parsedSuccess?.discordUserId,
+      guildId: parsedSuccess?.guildId,
     });
 
     try {
-      const parsed = decodeUserDefinedDataHex(result.userData?.userDefinedData);
       if (
-        parsed &&
-        parsed.kind === "discord-self-verification" &&
-        parsed.sessionId
+        parsedSuccess &&
+        parsedSuccess.kind === "discord-self-verification" &&
+        parsedSuccess.sessionId
       ) {
-        await handleDiscordVerificationSuccess(parsed.sessionId);
+        await handleDiscordVerificationSuccess(parsedSuccess.sessionId);
       }
     } catch (parseError) {
       logEvent(
