@@ -12,6 +12,7 @@ export const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 export const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID;
 export const DISCORD_GUILD_ID = process.env.DISCORD_GUILD_ID;
 export const DISCORD_VERIFIED_ROLE_ID = process.env.DISCORD_VERIFIED_ROLE_ID;
+export const DISCORD_LOG_CHANNEL_ID = process.env.DISCORD_LOG_CHANNEL_ID;
 
 export const SELF_APP_NAME =
   process.env.SELF_APP_NAME || "Self Discord Verification Hardcoded";
