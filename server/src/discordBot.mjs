@@ -25,6 +25,7 @@ import {
   DISCORD_CLIENT_ID,
   DISCORD_GUILD_ID,
   DISCORD_VERIFIED_ROLE_ID,
+  DISCORD_LOG_CHANNEL_ID,
   SELF_APP_NAME,
   SELF_LOGO_URL,
 } from "./config.mjs";
@@ -113,6 +114,22 @@ async function createSelfVerificationLink(sessionId, discordUser, generateQr = t
   return { universalLink, filename, filePath };
 }
 
+async function sendLogChannelMessage(message) {
+  if (!DISCORD_LOG_CHANNEL_ID || !discordClient) return;
+  try {
+    const channel = await discordClient.channels.fetch(DISCORD_LOG_CHANNEL_ID);
+    if (channel && channel.isTextBased()) {
+      await channel.send(message);
+    }
+  } catch (err) {
+    logEvent(
+      "verification.log_channel_error",
+      "Failed to send message to log channel",
+      { error: err instanceof Error ? err.message : String(err) },
+    );
+  }
+}
+
 export async function handleDiscordVerificationSuccess(sessionId) {
   const entry = pendingVerifications.get(sessionId);
   if (!entry) {
@@ -179,7 +196,7 @@ export async function handleDiscordVerificationSuccess(sessionId) {
         "🎉 **Verification Successful!**\n\n" +
         "✅ Your verification through Self.xyz has been completed successfully!\n\n" +
         "**What's New:**\n" +
-        "• You've been granted the **Self.xyz Verified** role\n" +
+        "• You've been granted the **Verified member** role\n" +
         "• You now have access to exclusive restricted channels\n" +
         "• Check out the newly unlocked channels in the Self Discord server\n\n" +
         "Welcome to the verified community! 🚀"
@@ -194,6 +211,8 @@ export async function handleDiscordVerificationSuccess(sessionId) {
         },
       );
     }
+
+    await sendLogChannelMessage(`✅ <@${discordUserId}> ID verification succeeded`);
   } catch (error) {
     logEvent(
       "verification.discord_error",
@@ -333,7 +352,7 @@ async function handlePlatformSelection(interaction) {
           "To access exclusive restricted channels in the Self Discord server, please complete verification using the Self.xyz mobile app.\n\n" +
           "**Tap the link below to verify:**\n\n" +
           shortUrl + "\n\n" +
-          "Once verified, you'll automatically receive the **Self.xyz Verified** role and gain access to exclusive channels!\n\n" +
+          "Once verified, you'll automatically receive the **Verified member** role and gain access to exclusive channels!\n\n" +
           "━━━━━━━━━━━━━━━━━━━━━━"
       );
     } else {
@@ -350,7 +369,7 @@ async function handlePlatformSelection(interaction) {
           "1️⃣ Open the Self.xyz app on your phone\n" +
           "2️⃣ Scan the QR code below\n" +
           "3️⃣ Complete the verification process\n\n" +
-          "Once verified, you'll automatically receive the **Self.xyz Verified** role and gain access to exclusive channels!\n\n" +
+          "Once verified, you'll automatically receive the **Verified member** role and gain access to exclusive channels!\n\n" +
           "━━━━━━━━━━━━━━━━━━━━━━",
         files: [attachment],
       });
@@ -501,5 +520,47 @@ export async function startDiscordBot() {
     logEvent("discord.login_error", "Failed to login Discord bot", {
       error: error instanceof Error ? error.message : String(error),
     });
+  }
+}
+
+export async function handleDiscordVerificationFailure(sessionId, reason) {
+  const entry = pendingVerifications.get(sessionId);
+  if (!entry) {
+    logEvent(
+      "verification.unknown_session_failure",
+      "Verification failure for unknown session",
+      { sessionId },
+    );
+    return;
+  }
+
+  pendingVerifications.delete(sessionId);
+
+  const { discordUserId, guildId } = entry;
+
+  await sendLogChannelMessage(
+    `❌ <@${discordUserId}> ID verification failed${reason ? ` (${reason})` : ""}`,
+  );
+
+  if (!discordClient) return;
+
+  try {
+    const guild = await discordClient.guilds.fetch(guildId || DISCORD_GUILD_ID);
+    const member = await guild.members.fetch(discordUserId);
+    const dm = await member.createDM();
+    await dm.send(
+      "❌ **Verification Failed**\n\n" +
+      (reason ? `Reason: ${reason}\n\n` : "") +
+      "Please try again with /verify.",
+    );
+  } catch (dmError) {
+    logEvent(
+      "verification.failure_dm_failed",
+      "Failed to DM user after failed verification",
+      {
+        discordUserId,
+        error: dmError instanceof Error ? dmError.message : String(dmError),
+      },
+    );
   }
 }
