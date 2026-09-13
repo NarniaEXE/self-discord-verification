@@ -16,6 +16,7 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  PermissionFlagsBits,
 } from "discord.js";
 import QRCode from "qrcode";
 
@@ -282,6 +283,38 @@ async function handleVerifyCommand(interaction) {
   }
 }
 
+async function handleSetupVerifyButton(interaction) {
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("start_verify")
+      .setLabel("✅ Verify")
+      .setStyle(ButtonStyle.Success),
+  );
+
+  try {
+    await interaction.channel.send({
+      content:
+        "Click Verify to gain access to the age restricted features of this server!",
+      components: [row],
+    });
+    await interaction.reply({
+      content: "Verify button posted in this channel.",
+      flags: MessageFlags.Ephemeral,
+    });
+  } catch (error) {
+    logEvent(
+      "discord.setup_verify_button_error",
+      "Failed to post verify button",
+      { error: error instanceof Error ? error.message : String(error) },
+    );
+    await interaction.reply({
+      content:
+        "Failed to post the verify button. Check that the bot can send messages in this channel.",
+      flags: MessageFlags.Ephemeral,
+    });
+  }
+}
+
 async function handlePlatformSelection(interaction) {
   const { user, guild, customId } = interaction;
   const isMobile = customId === "verify_mobile";
@@ -383,7 +416,7 @@ async function handlePlatformSelection(interaction) {
     try {
       await interaction.editReply({
         content:
-          "I couldn't send you a DM. Please enable DMs from this server and try `/verify` again.",
+          "I couldn't send you a DM. Please enable DMs from this server and click Verify again.",
       });
     } catch (editError) {
       logEvent(
@@ -441,6 +474,10 @@ async function registerDiscordCommands() {
     new SlashCommandBuilder()
       .setName("verify")
       .setDescription("Verify your age/identity using Self."),
+    new SlashCommandBuilder()
+      .setName("setup-verify-button")
+      .setDescription("Post the Verify button in this channel (admin only).")
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
   ].map((command) => command.toJSON());
 
   const rest = new REST({ version: "10" }).setToken(DISCORD_BOT_TOKEN);
@@ -494,10 +531,16 @@ export async function startDiscordBot() {
         if (interaction.commandName === "verify") {
           await handleVerifyCommand(interaction);
         }
+        if (interaction.commandName === "setup-verify-button") {
+          await handleSetupVerifyButton(interaction);
+        }
       }
 
       // Handle button clicks
       if (interaction.isButton()) {
+        if (interaction.customId === "start_verify") {
+          await handleVerifyCommand(interaction);
+        }
         if (interaction.customId === "verify_mobile" || interaction.customId === "verify_desktop") {
           await handlePlatformSelection(interaction);
         }
@@ -551,7 +594,7 @@ export async function handleDiscordVerificationFailure(sessionId, reason) {
     await dm.send(
       "❌ **Verification Failed**\n\n" +
       (reason ? `Reason: ${reason}\n\n` : "") +
-      "Please try again with /verify.",
+      "Please click the Verify button in the server again to retry.",
     );
   } catch (dmError) {
     logEvent(
