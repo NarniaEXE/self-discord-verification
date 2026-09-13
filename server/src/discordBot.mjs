@@ -17,6 +17,8 @@ import {
   ButtonBuilder,
   ButtonStyle,
   PermissionFlagsBits,
+  EmbedBuilder,
+  ChannelType,
 } from "discord.js";
 import QRCode from "qrcode";
 
@@ -319,6 +321,36 @@ async function handleSetupVerifyButton(interaction) {
   }
 }
 
+async function handleSayCommand(interaction) {
+  const channel = interaction.options.getChannel("channel");
+  const message = interaction.options.getString("message");
+
+  if (!channel || !channel.isTextBased()) {
+    await interaction.reply({
+      content: "Please pick a text channel.",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  try {
+    await channel.send(message);
+    await interaction.reply({
+      content: `Message sent in <#${channel.id}>.`,
+      flags: MessageFlags.Ephemeral,
+    });
+  } catch (error) {
+    logEvent("discord.say_command_error", "Failed to send message via /say", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    await interaction.reply({
+      content:
+        "Failed to send that message. Check that the bot can view and send messages in that channel.",
+      flags: MessageFlags.Ephemeral,
+    });
+  }
+}
+
 async function handlePlatformSelection(interaction) {
   const { user, guild, customId } = interaction;
   const isMobile = customId === "verify_mobile";
@@ -482,6 +514,23 @@ async function registerDiscordCommands() {
       .setName("setup-verify-button")
       .setDescription("Post the Verify button in this channel (admin only).")
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+    new SlashCommandBuilder()
+      .setName("say")
+      .setDescription("Send a message through the bot (admin only).")
+      .addChannelOption((option) =>
+        option
+          .setName("channel")
+          .setDescription("Channel to send the message in")
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setRequired(true),
+      )
+      .addStringOption((option) =>
+        option
+          .setName("message")
+          .setDescription("The message content")
+          .setRequired(true),
+      )
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
   ].map((command) => command.toJSON());
 
   const rest = new REST({ version: "10" }).setToken(DISCORD_BOT_TOKEN);
@@ -537,6 +586,9 @@ export async function startDiscordBot() {
         }
         if (interaction.commandName === "setup-verify-button") {
           await handleSetupVerifyButton(interaction);
+        }
+        if (interaction.commandName === "say") {
+          await handleSayCommand(interaction);
         }
       }
 
