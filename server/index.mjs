@@ -13,9 +13,12 @@ import {
   handleDiscordVerificationFailure,
 } from "./src/discordBot.mjs";
 import { resolveShortUrl } from "./src/urlShortener.mjs";
+import { registerDashboardRoutes } from "./src/dashboard.mjs";
 
 const app = express();
 app.use(bodyParser.json());
+
+registerDashboardRoutes(app);
 
 app.get("/", (_req, res) => {
   res.json({
