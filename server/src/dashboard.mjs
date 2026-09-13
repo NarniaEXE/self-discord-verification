@@ -1,7 +1,7 @@
 import fs from "node:fs";
 
-import { DASHBOARD_PASSWORD } from "./config.mjs";
-import { LOG_FILE_PATH } from "./logger.mjs";
+import { DASHBOARD_PASSWORD, DISCORD_GUILD_ID } from "./config.mjs";
+import { LOG_FILE_PATH, logEvent } from "./logger.mjs";
 import { getDiscordClient } from "./discordBot.mjs";
 
 function requireDashboardAuth(req, res, next) {
@@ -51,6 +51,7 @@ const RELEVANT_EVENT_TYPES = new Set([
   "verification.started",
   "verification.succeeded",
   "verification.failed",
+  "verification.error",
   "verification.role_assigned",
   "verification.dm_failed",
   "verification.failure_dm_failed",
@@ -112,12 +113,14 @@ export function registerDashboardRoutes(app) {
       (e) => e.type === "verification.succeeded",
     );
     const failedEntries = entries.filter((e) => e.type === "verification.failed");
+    const errorEntries = entries.filter((e) => e.type === "verification.error");
     const started = entries.filter(
       (e) => e.type === "verification.started",
     ).length;
 
     const succeeded = succeededEntries.length;
     const failed = failedEntries.length;
+    const errors = errorEntries.length;
     const successRate =
       succeeded + failed > 0
         ? Math.round((succeeded / (succeeded + failed)) * 1000) / 10
@@ -163,7 +166,210 @@ export function registerDashboardRoutes(app) {
   app.get("/dashboard", requireDashboardAuth, (_req, res) => {
     res.set("Content-Type", "text/html").send(DASHBOARD_HTML);
   });
+
+  app.get("/api/channels", requireDashboardAuth, async (_req, res) => {
+    const client = getDiscordClient();
+    if (!client) {
+      return res.status(503).json({ error: "Bot is not connected yet." });
+    }
+
+    try {
+      const guild = await client.guilds.fetch(DISCORD_GUILD_ID);
+      const channels = await guild.channels.fetch();
+
+      const textChannels = [...channels.values()]
+        .filter((c) => c && c.isTextBased && c.isTextBased() && !c.isThread())
+        .map((c) => ({ id: c.id, name: c.name, position: c.position || 0 }))
+        .sort((a, b) => a.position - b.position);
+
+      res.json({ channels: textChannels });
+    } catch (error) {
+      logEvent("dashboard.channels_fetch_error", "Failed to fetch channel list", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      res.status(500).json({ error: "Failed to fetch channels." });
+    }
+  });
+
+  app.post("/api/send-message", requireDashboardAuth, async (req, res) => {
+    const { channelId, message } = req.body || {};
+
+    if (!channelId || !message || !message.trim()) {
+      return res.status(400).json({ error: "channelId and message are required." });
+    }
+
+    const client = getDiscordClient();
+    if (!client) {
+      return res.status(503).json({ error: "Bot is not connected yet." });
+    }
+
+    try {
+      const channel = await client.channels.fetch(channelId);
+      if (!channel || !channel.isTextBased()) {
+        return res.status(400).json({ error: "That channel can't receive messages." });
+      }
+
+      await channel.send(message);
+
+      logEvent("dashboard.message_sent", "Message sent via dashboard compose", {
+        channelId,
+        channelName: channel.name,
+      });
+
+      res.json({ success: true });
+    } catch (error) {
+      logEvent("dashboard.send_message_error", "Failed to send message via dashboard", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      res.status(500).json({ error: "Failed to send message. Check bot permissions in that channel." });
+    }
+  });
+
+  app.get("/compose", requireDashboardAuth, (_req, res) => {
+    res.set("Content-Type", "text/html").send(COMPOSE_HTML);
+  });
 }
+
+const COMPOSE_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Send Message</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #0f1115;
+    color: #e6e8eb;
+    padding: 24px;
+    max-width: 560px;
+  }
+  h1 { font-size: 20px; margin: 0 0 8px; color: #fff; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #8fa2ff; text-decoration: none; }
+  label { display: block; font-size: 12px; color: #9aa0aa; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; margin-top: 16px; }
+  select, textarea {
+    width: 100%;
+    padding: 10px 12px;
+    background: #171a21;
+    border: 1px solid #262a33;
+    border-radius: 8px;
+    color: #e6e8eb;
+    font-size: 14px;
+    font-family: inherit;
+  }
+  textarea { min-height: 120px; resize: vertical; }
+  button {
+    margin-top: 18px;
+    padding: 10px 20px;
+    background: #3ecf8e;
+    color: #0f1115;
+    border: none;
+    border-radius: 8px;
+    font-weight: 700;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  #status { margin-top: 14px; font-size: 13px; }
+  #status.success { color: #3ecf8e; }
+  #status.error { color: #f2545b; }
+  #char-count { font-size: 11px; color: #6b7180; margin-top: 4px; text-align: right; }
+</style>
+</head>
+<body>
+  <h1>Send Message</h1>
+  <div class="nav"><a href="/dashboard">&larr; Back to dashboard</a></div>
+
+  <label for="channel-select">Channel</label>
+  <select id="channel-select">
+    <option value="">Loading channels...</option>
+  </select>
+
+  <label for="message-text">Message</label>
+  <textarea id="message-text" placeholder="Type your message..." maxlength="2000"></textarea>
+  <div id="char-count">0 / 2000</div>
+
+  <button id="send-btn">Send</button>
+  <div id="status"></div>
+
+  <script>
+    async function loadChannels() {
+      const select = document.getElementById("channel-select");
+      try {
+        const res = await fetch("/api/channels", { credentials: "same-origin" });
+        const data = await res.json();
+        select.innerHTML = "";
+        if (!data.channels || data.channels.length === 0) {
+          select.innerHTML = '<option value="">No channels found</option>';
+          return;
+        }
+        for (const ch of data.channels) {
+          const opt = document.createElement("option");
+          opt.value = ch.id;
+          opt.textContent = "#" + ch.name;
+          select.appendChild(opt);
+        }
+      } catch (err) {
+        select.innerHTML = '<option value="">Failed to load channels</option>';
+      }
+    }
+
+    const textarea = document.getElementById("message-text");
+    const charCount = document.getElementById("char-count");
+    textarea.addEventListener("input", () => {
+      charCount.textContent = textarea.value.length + " / 2000";
+    });
+
+    document.getElementById("send-btn").addEventListener("click", async () => {
+      const channelId = document.getElementById("channel-select").value;
+      const message = textarea.value;
+      const statusEl = document.getElementById("status");
+      const btn = document.getElementById("send-btn");
+
+      if (!channelId || !message.trim()) {
+        statusEl.textContent = "Pick a channel and write a message first.";
+        statusEl.className = "error";
+        return;
+      }
+
+      btn.disabled = true;
+      statusEl.textContent = "Sending...";
+      statusEl.className = "";
+
+      try {
+        const res = await fetch("/api/send-message", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ channelId, message }),
+        });
+        const data = await res.json();
+
+        if (res.ok && data.success) {
+          statusEl.textContent = "Message sent!";
+          statusEl.className = "success";
+          textarea.value = "";
+          charCount.textContent = "0 / 2000";
+        } else {
+          statusEl.textContent = data.error || "Failed to send message.";
+          statusEl.className = "error";
+        }
+      } catch (err) {
+        statusEl.textContent = "Failed to send message.";
+        statusEl.className = "error";
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    loadChannels();
+  </script>
+</body>
+</html>
+`;
 
 const DASHBOARD_HTML = `<!DOCTYPE html>
 <html lang="en">
@@ -245,6 +451,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 </head>
 <body>
   <h1>Verification Dashboard</h1>
+  <div style="margin-bottom: 16px; font-size: 13px;"><a href="/compose" style="color: #8fa2ff; text-decoration: none;">Send a message &rarr;</a></div>
   <div id="updated">Loading...</div>
 
   <div class="stats">
