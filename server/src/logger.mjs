@@ -2,11 +2,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { LOG_DIR } from "./config.mjs";
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const rootDir = path.join(__dirname, "..");
 
-const logsDir = path.join(rootDir, "logs");
+const logsDir = LOG_DIR || path.join(rootDir, "logs");
 fs.mkdirSync(logsDir, { recursive: true });
 const logFilePath = path.join(logsDir, "discord-verifier.log");
 export const LOG_FILE_PATH = logFilePath;
