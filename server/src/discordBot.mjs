@@ -29,6 +29,7 @@ import {
   DISCORD_GUILD_ID,
   DISCORD_VERIFIED_ROLE_ID,
   DISCORD_LOG_CHANNEL_ID,
+  DISCORD_ALERTS_CHANNEL_ID,
   SELF_APP_NAME,
   SELF_LOGO_URL,
 } from "./config.mjs";
@@ -137,6 +138,76 @@ async function sendLogChannelMessage(message) {
   }
 }
 
+async function sendAlertsChannelMessage(message) {
+  const targetChannelId = DISCORD_ALERTS_CHANNEL_ID || DISCORD_LOG_CHANNEL_ID;
+  if (!targetChannelId || !discordClient) return;
+  try {
+    const channel = await discordClient.channels.fetch(targetChannelId);
+    if (channel && channel.isTextBased()) {
+      await channel.send(message);
+    }
+  } catch (err) {
+    logEvent(
+      "verification.alerts_channel_error",
+      "Failed to send message to alerts channel",
+      { error: err instanceof Error ? err.message : String(err) },
+    );
+  }
+}
+
+const VERIFY_REMINDER_DELAY_MS = 10 * 60 * 1000; // 10 minutes
+
+function scheduleVerifyReminder(sessionId, discordUserId) {
+  setTimeout(async () => {
+    // Only remind if the session is still pending (not completed, failed, or flagged).
+    if (!pendingVerifications.has(sessionId)) return;
+    if (!discordClient) return;
+
+    try {
+      const user = await discordClient.users.fetch(discordUserId);
+      const dm = await user.createDM();
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId("verify_help")
+          .setLabel("❓ Help")
+          .setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder()
+          .setCustomId("start_verify")
+          .setLabel("🔄 Try Again")
+          .setStyle(ButtonStyle.Success),
+      );
+
+      await dm.send({
+        content:
+          "👋 **Still there?**\n\n" +
+          "You started verifying a little while ago but haven't finished yet. No rush, but here's a quick reminder in case you got stuck:\n\n" +
+          "1️⃣ Open the **Self.xyz app** on your phone\n" +
+          "2️⃣ Scan the QR code or tap the link we sent you\n" +
+          "3️⃣ Scan your ID/passport inside the app\n" +
+          "4️⃣ Wait for the checkmark — you'll get the Verified role automatically\n\n" +
+          "Stuck on something? Tap **Help** below, or **Try Again** to get a fresh link.",
+        components: [row],
+      });
+
+      logEvent("verification.reminder_sent", "Sent verification reminder DM", {
+        sessionId,
+        discordUserId,
+      });
+    } catch (err) {
+      logEvent(
+        "verification.reminder_error",
+        "Failed to send verification reminder DM",
+        {
+          sessionId,
+          discordUserId,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      );
+    }
+  }, VERIFY_REMINDER_DELAY_MS);
+}
+
 export async function handleDiscordVerificationSuccess(sessionId) {
   const entry = pendingVerifications.get(sessionId);
   if (!entry) {
@@ -233,6 +304,51 @@ export async function handleDiscordVerificationSuccess(sessionId) {
   }
 }
 
+export async function handleDuplicateIdentityDetected(
+  sessionId,
+  discordUserId,
+  existingUserId,
+) {
+  const entry = pendingVerifications.get(sessionId);
+  pendingVerifications.delete(sessionId);
+
+  const guildId = entry?.guildId || DISCORD_GUILD_ID;
+
+  await sendAlertsChannelMessage(
+    `🚨 **Duplicate ID detected**\n` +
+      `<@${discordUserId}> just tried to verify with an ID document that's already linked to <@${existingUserId}>.\n` +
+      `No role was granted. This may be an alt account — worth a manual look.`,
+  );
+
+  logEvent(
+    "verification.duplicate_identity",
+    "Same ID document already linked to a different Discord account",
+    { discordUserId, existingUserId },
+  );
+
+  if (!discordClient) return;
+
+  try {
+    const guild = await discordClient.guilds.fetch(guildId);
+    const member = await guild.members.fetch(discordUserId);
+    const dm = await member.createDM();
+    await dm.send(
+      "⚠️ **Verification Didn't Complete**\n\n" +
+        "Your ID document is already linked to a different Discord account on this server, so we couldn't grant you the Verified role automatically.\n\n" +
+        "If this is a mistake (e.g. you lost access to an old account), please open a ticket and staff will help you sort it out.",
+    );
+  } catch (dmError) {
+    logEvent(
+      "verification.duplicate_dm_failed",
+      "Failed to DM user after duplicate identity detection",
+      {
+        discordUserId,
+        error: dmError instanceof Error ? dmError.message : String(dmError),
+      },
+    );
+  }
+}
+
 async function handleVerifyCommand(interaction) {
   const { user, guild } = interaction;
 
@@ -307,6 +423,16 @@ async function handleSetupVerifyButton(interaction) {
       content: "Verify button posted in this channel.",
       flags: MessageFlags.Ephemeral,
     });
+    logEvent(
+      "discord.setup_verify_button_used",
+      "Staff posted the verify button",
+      {
+        staffUserId: interaction.user.id,
+        staffUsername: interaction.user.username,
+        channelId: interaction.channel.id,
+        channelName: interaction.channel.name,
+      },
+    );
   } catch (error) {
     logEvent(
       "discord.setup_verify_button_error",
@@ -339,6 +465,13 @@ async function handleSayCommand(interaction) {
       content: `Message sent in <#${channel.id}>.`,
       flags: MessageFlags.Ephemeral,
     });
+    logEvent("discord.say_command_used", "Staff used /say to send a message", {
+      staffUserId: interaction.user.id,
+      staffUsername: interaction.user.username,
+      channelId: channel.id,
+      channelName: channel.name,
+      message,
+    });
   } catch (error) {
     logEvent("discord.say_command_error", "Failed to send message via /say", {
       error: error instanceof Error ? error.message : String(error),
@@ -349,6 +482,19 @@ async function handleSayCommand(interaction) {
       flags: MessageFlags.Ephemeral,
     });
   }
+}
+
+async function handleVerifyHelp(interaction) {
+  await interaction.reply({
+    content:
+      "**Having trouble verifying?**\n\n" +
+      "1️⃣ Make sure you have the **Self.xyz app** installed (App Store / Google Play)\n" +
+      "2️⃣ Open the app, then scan the QR code or tap the link from your DM\n" +
+      "3️⃣ Inside the app, scan your ID card or passport (needs a biometric chip — most IDs issued in the last ~15 years have one)\n" +
+      "4️⃣ Wait for the green checkmark in the app — the Discord role is assigned automatically after that\n\n" +
+      "If it's still not working, open a ticket and staff can verify you manually instead.",
+    flags: MessageFlags.Ephemeral,
+  });
 }
 
 async function handlePlatformSelection(interaction) {
@@ -407,6 +553,8 @@ async function handlePlatformSelection(interaction) {
     createdAt: Date.now(),
     qrPath: verificationData.filePath,
   });
+
+  scheduleVerifyReminder(sessionId, user.id);
 
   try {
     const dm = await user.createDM();
@@ -599,6 +747,9 @@ export async function startDiscordBot() {
         }
         if (interaction.customId === "verify_mobile" || interaction.customId === "verify_desktop") {
           await handlePlatformSelection(interaction);
+        }
+        if (interaction.customId === "verify_help") {
+          await handleVerifyHelp(interaction);
         }
       }
     } catch (error) {
