@@ -11,9 +11,11 @@ import {
   startDiscordBot,
   handleDiscordVerificationSuccess,
   handleDiscordVerificationFailure,
+  handleDuplicateIdentityDetected,
 } from "./src/discordBot.mjs";
 import { resolveShortUrl } from "./src/urlShortener.mjs";
 import { registerDashboardRoutes } from "./src/dashboard.mjs";
+import { checkAndRecordNullifier } from "./src/identityTracker.mjs";
 
 const app = express();
 app.use(bodyParser.json());
@@ -271,7 +273,21 @@ app.post("/api/verify", async (req, res) => {
         parsedSuccess.kind === "discord-self-verification" &&
         parsedSuccess.sessionId
       ) {
-        await handleDiscordVerificationSuccess(parsedSuccess.sessionId);
+        const nullifier = result.discloseOutput?.nullifier;
+        const { isDuplicate, existingUserId } = checkAndRecordNullifier(
+          nullifier,
+          parsedSuccess.discordUserId,
+        );
+
+        if (isDuplicate) {
+          await handleDuplicateIdentityDetected(
+            parsedSuccess.sessionId,
+            parsedSuccess.discordUserId,
+            existingUserId,
+          );
+        } else {
+          await handleDiscordVerificationSuccess(parsedSuccess.sessionId);
+        }
       }
     } catch (parseError) {
       logEvent(
