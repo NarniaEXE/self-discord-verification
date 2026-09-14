@@ -350,11 +350,19 @@ export async function handleDuplicateIdentityDetected(
 }
 
 async function handleVerifyCommand(interaction) {
-  const { user, guild } = interaction;
+  const user = interaction.user;
 
-  if (!guild) {
+  let guild;
+  try {
+    guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID);
+  } catch (error) {
+    logEvent(
+      "discord.guild_fetch_error",
+      "Failed to fetch guild while handling verify",
+      { error: error instanceof Error ? error.message : String(error) },
+    );
     await interaction.reply({
-      content: "This command can only be used inside a server.",
+      content: "Something went wrong. Please try again in the server.",
       flags: MessageFlags.Ephemeral,
     });
     return;
@@ -502,7 +510,8 @@ async function handleVerifyRetry(interaction) {
 }
 
 async function handlePlatformSelection(interaction) {
-  const { user, guild, customId } = interaction;
+  const user = interaction.user;
+  const customId = interaction.customId;
   const isMobile = customId === "verify_mobile";
 
   const sessionId = crypto.randomUUID();
@@ -522,6 +531,25 @@ async function handlePlatformSelection(interaction) {
           updateError instanceof Error ? updateError.message : String(updateError),
       },
     );
+    return;
+  }
+
+  let guild;
+  try {
+    guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID);
+  } catch (error) {
+    logEvent(
+      "discord.guild_fetch_error",
+      "Failed to fetch guild while handling platform selection",
+      { error: error instanceof Error ? error.message : String(error) },
+    );
+    try {
+      await interaction.editReply({
+        content: "Something went wrong. Please try again in the server.",
+      });
+    } catch {
+      // best-effort only
+    }
     return;
   }
 
@@ -762,7 +790,7 @@ export async function startDiscordBot() {
         await handleVerifyHelp(interaction);
       }
     }
-    } catch (error) {
+  } catch (error) {
     logEvent("discord.interaction_error", "Error handling interaction", {
       type: interaction.type,
       customId: interaction.isButton()
@@ -783,6 +811,7 @@ try {
     error: error instanceof Error ? error.message : String(error),
   });
 }
+}
 
 export async function handleDiscordVerificationFailure(sessionId, reason) {
   const entry = pendingVerifications.get(sessionId);
@@ -796,7 +825,7 @@ export async function handleDiscordVerificationFailure(sessionId, reason) {
   }
 
   pendingVerifications.delete(sessionId);
-  
+
   const { discordUserId, guildId } = entry;
 
   await sendLogChannelMessage(
