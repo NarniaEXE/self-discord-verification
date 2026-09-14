@@ -185,7 +185,7 @@ function scheduleVerifyReminder(sessionId, discordUserId) {
           "1️⃣ Open the **Self.xyz app** on your phone\n" +
           "2️⃣ Scan the QR code or tap the link we sent you\n" +
           "3️⃣ Scan your ID/passport inside the app\n" +
-          "4️⃣ Wait for the checkmark — you'll get the Verified role automatically\n\n" +
+          "4️⃣ Wait for the checkmark - you'll get the Verified role automatically\n\n" +
           "Stuck on something? Tap **Help** below, or **Try Again** to get a fresh link.",
         components: [row],
       });
@@ -490,8 +490,8 @@ async function handleVerifyHelp(interaction) {
       "**Having trouble verifying?**\n\n" +
       "1️⃣ Make sure you have the **Self.xyz app** installed (App Store / Google Play)\n" +
       "2️⃣ Open the app, then scan the QR code or tap the link from your DM\n" +
-      "3️⃣ Inside the app, scan your ID card or passport (needs a biometric chip — most IDs issued in the last ~15 years have one)\n" +
-      "4️⃣ Wait for the green checkmark in the app — the Discord role is assigned automatically after that\n\n" +
+      "3️⃣ Inside the app, scan your ID card or passport (needs a biometric chip - most IDs issued in the last ~15 years have one)\n" +
+      "4️⃣ Wait for the green checkmark in the app - the Discord role is assigned automatically after that\n\n" +
       "If it's still not working, open a ticket and staff can verify you manually instead.",
     flags: MessageFlags.Ephemeral,
   });
