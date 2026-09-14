@@ -744,31 +744,44 @@ export async function startDiscordBot() {
         }
       }
 
-      // Handle button clicks
-if (interaction.isButton()) {
-  if (interaction.customId === "start_verify") {
-    await handleVerifyCommand(interaction);
-  }
-  if (interaction.customId === "verify_retry") {
-    await handleVerifyRetry(interaction);
-  }
-  if (interaction.customId === "verify_mobile" || interaction.customId === "verify_desktop") {
-    await handlePlatformSelection(interaction);
-  }
-  if (interaction.customId === "verify_help") {
-    await handleVerifyHelp(interaction);
-  }
-}
-  await registerDiscordCommands();
-
-  try {
-    await client.login(DISCORD_BOT_TOKEN);
-    discordClient = client;
+    // Handle button clicks
+    if (interaction.isButton()) {
+      if (interaction.customId === "start_verify") {
+        await handleVerifyCommand(interaction);
+      }
+      if (interaction.customId === "verify_retry") {
+        await handleVerifyRetry(interaction);
+      }
+      if (
+        interaction.customId === "verify_mobile" ||
+        interaction.customId === "verify_desktop"
+      ) {
+        await handlePlatformSelection(interaction);
+      }
+      if (interaction.customId === "verify_help") {
+        await handleVerifyHelp(interaction);
+      }
+    }
   } catch (error) {
-    logEvent("discord.login_error", "Failed to login Discord bot", {
+    logEvent("discord.interaction_error", "Error handling interaction", {
+      type: interaction.type,
+      customId: interaction.isButton()
+        ? interaction.customId
+        : interaction.commandName,
       error: error instanceof Error ? error.message : String(error),
     });
   }
+});
+
+await registerDiscordCommands();
+
+try {
+  await client.login(DISCORD_BOT_TOKEN);
+  discordClient = client;
+} catch (error) {
+  logEvent("discord.login_error", "Failed to login Discord bot", {
+    error: error instanceof Error ? error.message : String(error),
+  });
 }
 
 export async function handleDiscordVerificationFailure(sessionId, reason) {
