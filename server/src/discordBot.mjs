@@ -762,7 +762,7 @@ export async function startDiscordBot() {
         await handleVerifyHelp(interaction);
       }
     }
-  } catch (error) {
+    } catch (error) {
     logEvent("discord.interaction_error", "Error handling interaction", {
       type: interaction.type,
       customId: interaction.isButton()
@@ -783,7 +783,6 @@ try {
     error: error instanceof Error ? error.message : String(error),
   });
 }
-}
 
 export async function handleDiscordVerificationFailure(sessionId, reason) {
   const entry = pendingVerifications.get(sessionId);
@@ -797,7 +796,7 @@ export async function handleDiscordVerificationFailure(sessionId, reason) {
   }
 
   pendingVerifications.delete(sessionId);
-
+  
   const { discordUserId, guildId } = entry;
 
   await sendLogChannelMessage(
