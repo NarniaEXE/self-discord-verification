@@ -56,8 +56,16 @@ const RELEVANT_EVENT_TYPES = new Set([
   "verification.dm_failed",
   "verification.failure_dm_failed",
   "verification.log_channel_error",
+  "verification.duplicate_identity",
   "discord.ready",
   "discord.commands_registered",
+]);
+
+const AUDIT_EVENT_TYPES = new Set([
+  "discord.say_command_used",
+  "discord.setup_verify_button_used",
+  "dashboard.message_sent",
+  "verification.duplicate_identity",
 ]);
 
 const usernameCache = new Map();
@@ -192,10 +200,14 @@ export function registerDashboardRoutes(app) {
   });
 
   app.post("/api/send-message", requireDashboardAuth, async (req, res) => {
-    const { channelId, message } = req.body || {};
+    const { channelId, message, senderName } = req.body || {};
 
     if (!channelId || !message || !message.trim()) {
       return res.status(400).json({ error: "channelId and message are required." });
+    }
+
+    if (!senderName || !senderName.trim()) {
+      return res.status(400).json({ error: "Please enter your name for the audit log." });
     }
 
     const client = getDiscordClient();
@@ -214,6 +226,8 @@ export function registerDashboardRoutes(app) {
       logEvent("dashboard.message_sent", "Message sent via dashboard compose", {
         channelId,
         channelName: channel.name,
+        senderName: senderName.trim(),
+        message,
       });
 
       res.json({ success: true });
@@ -228,7 +242,187 @@ export function registerDashboardRoutes(app) {
   app.get("/compose", requireDashboardAuth, (_req, res) => {
     res.set("Content-Type", "text/html").send(COMPOSE_HTML);
   });
+
+  app.get("/api/audit-data", requireDashboardAuth, async (_req, res) => {
+    const entries = readLogEntries(1000);
+
+    const feed = entries
+      .filter((e) => AUDIT_EVENT_TYPES.has(e.type))
+      .slice(-200)
+      .reverse();
+
+    const uniqueIds = [
+      ...new Set(
+        feed
+          .map((e) => e.staffUserId || e.discordUserId)
+          .filter(Boolean),
+      ),
+    ];
+    const usernames = {};
+    await Promise.all(
+      uniqueIds.map(async (id) => {
+        usernames[id] = await resolveUsername(id);
+      }),
+    );
+
+    const enrichedFeed = feed.map((e) => {
+      const actorId = e.staffUserId || e.discordUserId;
+      return {
+        ...e,
+        actorId,
+        actorName:
+          e.senderName ||
+          e.staffUsername ||
+          (actorId ? usernames[actorId] : null) ||
+          actorId ||
+          "unknown",
+      };
+    });
+
+    res.json({ feed: enrichedFeed });
+  });
+
+  app.get("/audit-log", requireDashboardAuth, (_req, res) => {
+    res.set("Content-Type", "text/html").send(AUDIT_HTML);
+  });
 }
+
+const AUDIT_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Audit Log</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #0f1115;
+    color: #e6e8eb;
+    padding: 24px;
+  }
+  h1 { font-size: 20px; margin: 0 0 8px; color: #fff; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #8fa2ff; text-decoration: none; margin-right: 16px; }
+  #search {
+    width: 100%;
+    padding: 8px 12px;
+    margin-bottom: 12px;
+    background: #171a21;
+    border: 1px solid #262a33;
+    border-radius: 8px;
+    color: #e6e8eb;
+    font-size: 13px;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #21242c; vertical-align: top; }
+  th { color: #9aa0aa; font-weight: 500; text-transform: uppercase; font-size: 11px; letter-spacing: 0.04em; }
+  tr:hover { background: #1c1f27; }
+  .badge { padding: 2px 8px; border-radius: 6px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+  .badge.say { background: rgba(143,162,255,0.15); color: #8fa2ff; }
+  .badge.compose { background: rgba(62,207,142,0.15); color: #3ecf8e; }
+  .badge.setup { background: rgba(242,193,78,0.15); color: #f2c14e; }
+  .badge.duplicate { background: rgba(242,84,91,0.15); color: #f2545b; }
+  .muted { color: #6b7180; }
+  #updated { font-size: 12px; color: #6b7180; margin-bottom: 16px; }
+</style>
+</head>
+<body>
+  <h1>Audit Log</h1>
+  <div class="nav"><a href="/dashboard">&larr; Dashboard</a><a href="/compose">Send a message &rarr;</a></div>
+  <div id="updated">Loading...</div>
+
+  <input id="search" type="text" placeholder="Search by name, channel, or message..." />
+
+  <table>
+    <thead>
+      <tr><th>Time</th><th>Action</th><th>Who</th><th>Where</th><th>Content</th></tr>
+    </thead>
+    <tbody id="feed-body">
+      <tr><td colspan="5" class="muted">Loading...</td></tr>
+    </tbody>
+  </table>
+
+  <script>
+    let latestFeed = [];
+
+    function badgeInfo(type) {
+      if (type === "discord.say_command_used") return { cls: "say", label: "/say" };
+      if (type === "dashboard.message_sent") return { cls: "compose", label: "Compose" };
+      if (type === "discord.setup_verify_button_used") return { cls: "setup", label: "Setup Button" };
+      if (type === "verification.duplicate_identity") return { cls: "duplicate", label: "Duplicate ID" };
+      return { cls: "", label: type };
+    }
+
+    function formatTime(iso) {
+      return new Date(iso).toLocaleString();
+    }
+
+    function renderFeed(filterText) {
+      const tbody = document.getElementById("feed-body");
+      tbody.innerHTML = "";
+
+      const term = (filterText || "").trim().toLowerCase();
+      const filtered = !term
+        ? latestFeed
+        : latestFeed.filter((e) => {
+            const haystack = [
+              e.actorName,
+              e.channelName,
+              e.message,
+              e.existingUserId,
+            ]
+              .filter(Boolean)
+              .join(" ")
+              .toLowerCase();
+            return haystack.includes(term);
+          });
+
+      if (filtered.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" class="muted">No matching entries.</td></tr>';
+        return;
+      }
+
+      for (const entry of filtered) {
+        const tr = document.createElement("tr");
+        const info = badgeInfo(entry.type);
+        const where = entry.channelName ? "#" + entry.channelName : (entry.existingUserId ? "vs <@" + entry.existingUserId + ">" : "-");
+        const content = entry.message || entry.reason || entry.message === "" ? (entry.message || "") : "-";
+        tr.innerHTML =
+          "<td>" + formatTime(entry.timestamp) + "</td>" +
+          '<td><span class="badge ' + info.cls + '">' + info.label + "</span></td>" +
+          "<td>" + (entry.actorName || "-") + "</td>" +
+          "<td>" + where + "</td>" +
+          '<td class="muted">' + content + "</td>";
+        tbody.appendChild(tr);
+      }
+    }
+
+    async function refresh() {
+      try {
+        const res = await fetch("/api/audit-data", { credentials: "same-origin" });
+        if (!res.ok) return;
+        const data = await res.json();
+        latestFeed = data.feed;
+        renderFeed(document.getElementById("search").value);
+        document.getElementById("updated").textContent =
+          "Last updated: " + new Date().toLocaleTimeString();
+      } catch (err) {
+        console.error("Failed to refresh audit log", err);
+      }
+    }
+
+    document.getElementById("search").addEventListener("input", (e) => {
+      renderFeed(e.target.value);
+    });
+
+    refresh();
+    setInterval(refresh, 5000);
+  </script>
+</body>
+</html>
+`;
 
 const COMPOSE_HTML = `<!DOCTYPE html>
 <html lang="en">
@@ -281,7 +475,10 @@ const COMPOSE_HTML = `<!DOCTYPE html>
 </head>
 <body>
   <h1>Send Message</h1>
-  <div class="nav"><a href="/dashboard">&larr; Back to dashboard</a></div>
+  <div class="nav"><a href="/dashboard">&larr; Back to dashboard</a> <a href="/audit-log" style="margin-left: 16px;">Audit log &rarr;</a></div>
+
+  <label for="sender-name">Your Name (for the audit log)</label>
+  <input id="sender-name" type="text" placeholder="e.g. Jay" style="width: 100%; padding: 10px 12px; background: #171a21; border: 1px solid #262a33; border-radius: 8px; color: #e6e8eb; font-size: 14px;" />
 
   <label for="channel-select">Channel</label>
   <select id="channel-select">
@@ -296,6 +493,12 @@ const COMPOSE_HTML = `<!DOCTYPE html>
   <div id="status"></div>
 
   <script>
+    const senderNameInput = document.getElementById("sender-name");
+    senderNameInput.value = localStorage.getItem("dashboardSenderName") || "";
+    senderNameInput.addEventListener("input", () => {
+      localStorage.setItem("dashboardSenderName", senderNameInput.value);
+    });
+
     async function loadChannels() {
       const select = document.getElementById("channel-select");
       try {
@@ -326,8 +529,15 @@ const COMPOSE_HTML = `<!DOCTYPE html>
     document.getElementById("send-btn").addEventListener("click", async () => {
       const channelId = document.getElementById("channel-select").value;
       const message = textarea.value;
+      const senderName = senderNameInput.value;
       const statusEl = document.getElementById("status");
       const btn = document.getElementById("send-btn");
+
+      if (!senderName.trim()) {
+        statusEl.textContent = "Please enter your name first.";
+        statusEl.className = "error";
+        return;
+      }
 
       if (!channelId || !message.trim()) {
         statusEl.textContent = "Pick a channel and write a message first.";
@@ -344,7 +554,7 @@ const COMPOSE_HTML = `<!DOCTYPE html>
           method: "POST",
           credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ channelId, message }),
+          body: JSON.stringify({ channelId, message, senderName }),
         });
         const data = await res.json();
 
@@ -451,7 +661,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 </head>
 <body>
   <h1>Verification Dashboard</h1>
-  <div style="margin-bottom: 16px; font-size: 13px;"><a href="/compose" style="color: #8fa2ff; text-decoration: none;">Send a message &rarr;</a></div>
+  <div style="margin-bottom: 16px; font-size: 13px;"><a href="/compose" style="color: #8fa2ff; text-decoration: none; margin-right: 16px;">Send a message &rarr;</a><a href="/audit-log" style="color: #8fa2ff; text-decoration: none;">Audit log &rarr;</a></div>
   <div id="updated">Loading...</div>
 
   <div class="stats">
