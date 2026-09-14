@@ -13,6 +13,7 @@ export const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID;
 export const DISCORD_GUILD_ID = process.env.DISCORD_GUILD_ID;
 export const DISCORD_VERIFIED_ROLE_ID = process.env.DISCORD_VERIFIED_ROLE_ID;
 export const DISCORD_LOG_CHANNEL_ID = process.env.DISCORD_LOG_CHANNEL_ID;
+export const DISCORD_ALERTS_CHANNEL_ID = process.env.DISCORD_ALERTS_CHANNEL_ID;
 export const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD;
 export const LOG_DIR = process.env.LOG_DIR;
 
