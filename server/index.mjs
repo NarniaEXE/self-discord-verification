@@ -323,7 +323,7 @@ app.post("/api/verify", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`Self Express Backend listening on http://localhost:${PORT}`);
   console.log(`Expected verify endpoint (SELF_ENDPOINT): ${SELF_ENDPOINT}`);
   startDiscordBot().catch((error) => {
