@@ -783,6 +783,7 @@ try {
     error: error instanceof Error ? error.message : String(error),
   });
 }
+}
 
 export async function handleDiscordVerificationFailure(sessionId, reason) {
   const entry = pendingVerifications.get(sessionId);
