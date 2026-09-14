@@ -173,7 +173,7 @@ function scheduleVerifyReminder(sessionId, discordUserId) {
           .setLabel("❓ Help")
           .setStyle(ButtonStyle.Secondary),
         new ButtonBuilder()
-          .setCustomId("start_verify")
+          .setCustomId("verify_retry")
           .setLabel("🔄 Try Again")
           .setStyle(ButtonStyle.Success),
       );
