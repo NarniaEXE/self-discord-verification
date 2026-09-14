@@ -497,6 +497,10 @@ async function handleVerifyHelp(interaction) {
   });
 }
 
+async function handleVerifyRetry(interaction) {
+  await handleVerifyCommand(interaction);
+}
+
 async function handlePlatformSelection(interaction) {
   const { user, guild, customId } = interaction;
   const isMobile = customId === "verify_mobile";
@@ -741,26 +745,20 @@ export async function startDiscordBot() {
       }
 
       // Handle button clicks
-      if (interaction.isButton()) {
-        if (interaction.customId === "start_verify") {
-          await handleVerifyCommand(interaction);
-        }
-        if (interaction.customId === "verify_mobile" || interaction.customId === "verify_desktop") {
-          await handlePlatformSelection(interaction);
-        }
-        if (interaction.customId === "verify_help") {
-          await handleVerifyHelp(interaction);
-        }
-      }
-    } catch (error) {
-      logEvent("discord.interaction_error", "Error handling interaction", {
-        type: interaction.type,
-        customId: interaction.isButton() ? interaction.customId : interaction.commandName,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  });
-
+if (interaction.isButton()) {
+  if (interaction.customId === "start_verify") {
+    await handleVerifyCommand(interaction);
+  }
+  if (interaction.customId === "verify_retry") {
+    await handleVerifyRetry(interaction);
+  }
+  if (interaction.customId === "verify_mobile" || interaction.customId === "verify_desktop") {
+    await handlePlatformSelection(interaction);
+  }
+  if (interaction.customId === "verify_help") {
+    await handleVerifyHelp(interaction);
+  }
+}
   await registerDiscordCommands();
 
   try {
