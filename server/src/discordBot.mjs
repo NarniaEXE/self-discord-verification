@@ -19,6 +19,7 @@ import {
   PermissionFlagsBits,
   EmbedBuilder,
   ChannelType,
+  ActivityType,
 } from "discord.js";
 import QRCode from "qrcode";
 
@@ -30,11 +31,13 @@ import {
   DISCORD_VERIFIED_ROLE_ID,
   DISCORD_LOG_CHANNEL_ID,
   DISCORD_ALERTS_CHANNEL_ID,
+  DISCORD_ADMIN_USER_ID,
   SELF_APP_NAME,
   SELF_LOGO_URL,
 } from "./config.mjs";
-import { logEvent } from "./logger.mjs";
+import { logEvent, LOG_FILE_PATH } from "./logger.mjs";
 import { createShortUrl } from "./urlShortener.mjs";
+import { removeIdentityByDiscordUserId } from "./identityTracker.mjs";
 
 const require = createRequire(import.meta.url);
 const { SelfAppBuilder, getUniversalLink } = require("@selfxyz/common");
@@ -46,11 +49,40 @@ const rootDir = path.join(__dirname, "..");
 const qrOutputDir = path.join(rootDir, "qrcodes");
 fs.mkdirSync(qrOutputDir, { recursive: true });
 
+const QR_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
+
+function cleanupStaleQrFiles() {
+  fs.readdir(qrOutputDir, (readErr, files) => {
+    if (readErr) return;
+
+    const now = Date.now();
+    for (const file of files) {
+      const filePath = path.join(qrOutputDir, file);
+      fs.stat(filePath, (statErr, stats) => {
+        if (statErr) return;
+        if (now - stats.mtimeMs > QR_MAX_AGE_MS) {
+          fs.unlink(filePath, () => {});
+        }
+      });
+    }
+  });
+}
+
+setInterval(cleanupStaleQrFiles, 30 * 60 * 1000); // sweep every 30 minutes
+
 const pendingVerifications = new Map();
 let discordClient = null;
 
 export function getDiscordClient() {
   return discordClient;
+}
+
+export function getPendingVerifications() {
+  return [...pendingVerifications.entries()].map(([sessionId, data]) => ({
+    sessionId,
+    discordUserId: data.discordUserId,
+    createdAt: data.createdAt,
+  }));
 }
 
 async function createSelfVerificationLink(sessionId, discordUser, generateQr = true, isMobile = false) {
@@ -153,6 +185,33 @@ async function sendAlertsChannelMessage(message) {
       { error: err instanceof Error ? err.message : String(err) },
     );
   }
+}
+
+async function dmAdmin(message) {
+  if (!DISCORD_ADMIN_USER_ID || !discordClient) return;
+  try {
+    const admin = await discordClient.users.fetch(DISCORD_ADMIN_USER_ID);
+    const dm = await admin.createDM();
+    await dm.send(message);
+  } catch (err) {
+    logEvent("discord.admin_dm_error", "Failed to DM the configured admin", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+function buildVerificationEmbed({ success, discordUserId, reason }) {
+  const embed = new EmbedBuilder()
+    .setColor(success ? 0x3ecf8e : 0xf2545b)
+    .setTitle(success ? "✅ Verification Succeeded" : "❌ Verification Failed")
+    .setDescription(`<@${discordUserId}>`)
+    .setTimestamp();
+
+  if (!success && reason) {
+    embed.addFields({ name: "Reason", value: reason });
+  }
+
+  return embed;
 }
 
 const VERIFY_REMINDER_DELAY_MS = 10 * 60 * 1000; // 10 minutes
@@ -290,7 +349,9 @@ export async function handleDiscordVerificationSuccess(sessionId) {
       );
     }
 
-    await sendLogChannelMessage(`✅ <@${discordUserId}> ID verification succeeded`);
+    await sendLogChannelMessage({
+      embeds: [buildVerificationEmbed({ success: true, discordUserId })],
+    });
   } catch (error) {
     logEvent(
       "verification.discord_error",
@@ -314,10 +375,20 @@ export async function handleDuplicateIdentityDetected(
 
   const guildId = entry?.guildId || DISCORD_GUILD_ID;
 
-  await sendAlertsChannelMessage(
-    `🚨 **Duplicate ID detected**\n` +
-      `<@${discordUserId}> just tried to verify with an ID document that's already linked to <@${existingUserId}>.\n` +
-      `No role was granted. This may be an alt account — worth a manual look.`,
+  const duplicateEmbed = new EmbedBuilder()
+    .setColor(0xff6b6b)
+    .setTitle("🚨 Duplicate ID Detected")
+    .setDescription(
+      `<@${discordUserId}> just tried to verify with an ID document that's already linked to <@${existingUserId}>.\n\n` +
+        "No role was granted. This may be an alt account - worth a manual look.",
+    )
+    .setTimestamp();
+
+  await sendAlertsChannelMessage({ embeds: [duplicateEmbed] });
+  await dmAdmin(
+    `🚨 Duplicate ID detected: <@${discordUserId}> tried to verify with an ID already linked to <@${existingUserId}>. Check ${
+      DISCORD_ALERTS_CHANNEL_ID ? `<#${DISCORD_ALERTS_CHANNEL_ID}>` : "the alerts channel"
+    } for details.`,
   );
 
   logEvent(
@@ -349,8 +420,24 @@ export async function handleDuplicateIdentityDetected(
   }
 }
 
+const VERIFY_COOLDOWN_MS = 60 * 1000; // 60 seconds between attempts per user
+const SESSION_EXPIRY_MINUTES = 30;
+const lastVerifyAttempt = new Map();
+
 async function handleVerifyCommand(interaction) {
   const user = interaction.user;
+
+  const lastAttempt = lastVerifyAttempt.get(user.id);
+  const now = Date.now();
+  if (lastAttempt && now - lastAttempt < VERIFY_COOLDOWN_MS) {
+    const waitSeconds = Math.ceil((VERIFY_COOLDOWN_MS - (now - lastAttempt)) / 1000);
+    await interaction.reply({
+      content: `Please wait ${waitSeconds}s before trying to verify again.`,
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+  lastVerifyAttempt.set(user.id, now);
 
   let guild;
   try {
@@ -411,6 +498,160 @@ async function handleVerifyCommand(interaction) {
       },
     );
   }
+}
+
+async function handleUnverifyCommand(interaction) {
+  const targetUser = interaction.options.getUser("user");
+
+  if (!targetUser) {
+    await interaction.reply({
+      content: "Please pick a user.",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  try {
+    const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID);
+    const member = await guild.members.fetch(targetUser.id);
+
+    let roleRemoved = false;
+    if (DISCORD_VERIFIED_ROLE_ID && member.roles.cache.has(DISCORD_VERIFIED_ROLE_ID)) {
+      await member.roles.remove(DISCORD_VERIFIED_ROLE_ID);
+      roleRemoved = true;
+    }
+
+    const identitiesRemoved = removeIdentityByDiscordUserId(targetUser.id);
+
+    await interaction.reply({
+      content:
+        `Done. ${roleRemoved ? "Removed the Verified role. " : "They didn't have the Verified role. "}` +
+        `${identitiesRemoved > 0 ? `Cleared ${identitiesRemoved} linked ID record(s), so they can verify fresh.` : "No linked ID record found to clear."}`,
+      flags: MessageFlags.Ephemeral,
+    });
+
+    logEvent("discord.unverify_command_used", "Staff manually unverified a user", {
+      staffUserId: interaction.user.id,
+      staffUsername: interaction.user.username,
+      targetUserId: targetUser.id,
+      roleRemoved,
+      identitiesRemoved,
+    });
+  } catch (error) {
+    logEvent("discord.unverify_command_error", "Failed to unverify user", {
+      targetUserId: targetUser.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    await interaction.reply({
+      content: "Something went wrong while unverifying that user.",
+      flags: MessageFlags.Ephemeral,
+    });
+  }
+}
+
+function readRecentLogEntries(limit = 3000) {
+  if (!fs.existsSync(LOG_FILE_PATH)) return [];
+  const raw = fs.readFileSync(LOG_FILE_PATH, "utf8");
+  const lines = raw.split("\n").filter(Boolean);
+  const entries = [];
+  for (const line of lines.slice(-limit)) {
+    try {
+      entries.push(JSON.parse(line));
+    } catch {
+      // skip malformed lines
+    }
+  }
+  return entries;
+}
+
+async function handleStatsCommand(interaction) {
+  const entries = readRecentLogEntries(3000);
+
+  const started = entries.filter((e) => e.type === "verification.started").length;
+  const succeeded = entries.filter((e) => e.type === "verification.succeeded").length;
+  const failed = entries.filter((e) => e.type === "verification.failed").length;
+  const duplicates = entries.filter(
+    (e) => e.type === "verification.duplicate_identity",
+  ).length;
+  const successRate =
+    succeeded + failed > 0
+      ? Math.round((succeeded / (succeeded + failed)) * 1000) / 10
+      : null;
+  const pendingNow = pendingVerifications.size;
+
+  const lines = [
+    `**Started:** ${started}`,
+    `**Succeeded:** ${succeeded}`,
+    `**Failed:** ${failed}`,
+    `**Duplicate ID attempts:** ${duplicates}`,
+    `**Success rate:** ${successRate === null ? "-" : successRate + "%"}`,
+    `**Open sessions right now:** ${pendingNow}`,
+    "",
+    "_Based on recent logs, older history may have rolled off. Full dashboard has more detail._",
+  ];
+
+  await interaction.reply({
+    content: `**Verification Stats**\n\n${lines.join("\n")}`,
+    flags: MessageFlags.Ephemeral,
+  });
+}
+
+async function handleWhoisCommand(interaction) {
+  const targetUser = interaction.options.getUser("user");
+
+  if (!targetUser) {
+    await interaction.reply({
+      content: "Please pick a user.",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  let hasRole = false;
+  try {
+    const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID);
+    const member = await guild.members.fetch(targetUser.id);
+    hasRole = DISCORD_VERIFIED_ROLE_ID
+      ? member.roles.cache.has(DISCORD_VERIFIED_ROLE_ID)
+      : false;
+  } catch {
+    // member may have left the server, keep hasRole false
+  }
+
+  const entries = readRecentLogEntries(3000).filter(
+    (e) => e.discordUserId === targetUser.id,
+  );
+  const reversed = [...entries].reverse();
+
+  const lastSuccess = reversed.find((e) => e.type === "verification.role_assigned");
+  const lastFailure = reversed.find((e) => e.type === "verification.failed");
+  const lastDuplicate = reversed.find((e) => e.type === "verification.duplicate_identity");
+  const hasPendingSession = [...pendingVerifications.values()].some(
+    (v) => v.discordUserId === targetUser.id,
+  );
+
+  const lines = [
+    `**Verified role:** ${hasRole ? "Yes" : "No"}`,
+    `**Last successful verification:** ${
+      lastSuccess ? new Date(lastSuccess.timestamp).toLocaleString() : "None found in recent logs"
+    }`,
+  ];
+
+  if (lastFailure) {
+    lines.push(`**Last failed attempt:** ${new Date(lastFailure.timestamp).toLocaleString()}`);
+  }
+  if (lastDuplicate) {
+    lines.push(`**Flagged as duplicate ID:** ${new Date(lastDuplicate.timestamp).toLocaleString()}`);
+  }
+
+  lines.push(`**Pending session right now:** ${hasPendingSession ? "Yes" : "No"}`);
+  lines.push("");
+  lines.push("_Note: this only covers what's in recent logs, older history may have rolled off._");
+
+  await interaction.reply({
+    content: `**Verification info for <@${targetUser.id}>**\n\n${lines.join("\n")}`,
+    flags: MessageFlags.Ephemeral,
+  });
 }
 
 async function handleSetupVerifyButton(interaction) {
@@ -601,6 +842,7 @@ async function handlePlatformSelection(interaction) {
           "To access exclusive restricted channels in the Self Discord server, please complete verification using the Self.xyz mobile app.\n\n" +
           "**Tap the link below to verify:**\n\n" +
           shortUrl + "\n\n" +
+          `⏳ This link expires in ${SESSION_EXPIRY_MINUTES} minutes.\n\n` +
           "Once verified, you'll automatically receive the **Verified member** role and gain access to exclusive channels!\n\n" +
           "━━━━━━━━━━━━━━━━━━━━━━"
       );
@@ -618,9 +860,21 @@ async function handlePlatformSelection(interaction) {
           "1️⃣ Open the Self.xyz app on your phone\n" +
           "2️⃣ Scan the QR code below\n" +
           "3️⃣ Complete the verification process\n\n" +
+          `⏳ This QR code expires in ${SESSION_EXPIRY_MINUTES} minutes.\n\n` +
           "Once verified, you'll automatically receive the **Verified member** role and gain access to exclusive channels!\n\n" +
           "━━━━━━━━━━━━━━━━━━━━━━",
         files: [attachment],
+      });
+
+      // Discord has now hosted the image on its own CDN, so the local
+      // copy is no longer needed.
+      fs.unlink(verificationData.filePath, (unlinkErr) => {
+        if (unlinkErr) {
+          logEvent("qr.cleanup_error", "Failed to delete QR file after sending", {
+            filePath: verificationData.filePath,
+            error: unlinkErr.message,
+          });
+        }
       });
     }
   } catch (dmError) {
@@ -711,6 +965,30 @@ async function registerDiscordCommands() {
           .setRequired(true),
       )
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+    new SlashCommandBuilder()
+      .setName("unverify")
+      .setDescription("Remove a user's Verified role and clear their linked ID record (admin only).")
+      .addUserOption((option) =>
+        option
+          .setName("user")
+          .setDescription("The user to unverify")
+          .setRequired(true),
+      )
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+    new SlashCommandBuilder()
+      .setName("whois")
+      .setDescription("Look up a user's verification status (admin only).")
+      .addUserOption((option) =>
+        option
+          .setName("user")
+          .setDescription("The user to look up")
+          .setRequired(true),
+      )
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+    new SlashCommandBuilder()
+      .setName("stats")
+      .setDescription("Quick verification stats summary (admin only).")
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
   ].map((command) => command.toJSON());
 
   const rest = new REST({ version: "10" }).setToken(DISCORD_BOT_TOKEN);
@@ -750,11 +1028,30 @@ export async function startDiscordBot() {
     partials: [Partials.Channel],
   });
 
+  async function updateBotPresence() {
+    if (!DISCORD_VERIFIED_ROLE_ID) return;
+    try {
+      const guild = await client.guilds.fetch(DISCORD_GUILD_ID);
+      await guild.members.fetch(); // populate cache so the role count is accurate
+      const role = await guild.roles.fetch(DISCORD_VERIFIED_ROLE_ID);
+      const count = role ? role.members.size : 0;
+      client.user.setActivity(`over ${count} verified members`, {
+        type: ActivityType.Watching,
+      });
+    } catch (err) {
+      logEvent("discord.presence_update_error", "Failed to update bot presence", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   client.once("clientReady", () => {
     logEvent("discord.ready", "Discord bot logged in", {
       username: client.user?.username,
       id: client.user?.id,
     });
+    updateBotPresence();
+    setInterval(updateBotPresence, 15 * 60 * 1000); // refresh every 15 minutes
   });
 
   client.on("interactionCreate", async (interaction) => {
@@ -769,6 +1066,15 @@ export async function startDiscordBot() {
         }
         if (interaction.commandName === "say") {
           await handleSayCommand(interaction);
+        }
+        if (interaction.commandName === "unverify") {
+          await handleUnverifyCommand(interaction);
+        }
+        if (interaction.commandName === "whois") {
+          await handleWhoisCommand(interaction);
+        }
+        if (interaction.commandName === "stats") {
+          await handleStatsCommand(interaction);
         }
       }
 
@@ -828,9 +1134,9 @@ export async function handleDiscordVerificationFailure(sessionId, reason) {
 
   const { discordUserId, guildId } = entry;
 
-  await sendLogChannelMessage(
-    `❌ <@${discordUserId}> ID verification failed${reason ? ` (${reason})` : ""}`,
-  );
+  await sendLogChannelMessage({
+    embeds: [buildVerificationEmbed({ success: false, discordUserId, reason })],
+  });
 
   if (!discordClient) return;
 
