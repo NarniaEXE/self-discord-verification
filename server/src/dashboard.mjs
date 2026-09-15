@@ -5,17 +5,20 @@ import { LOG_FILE_PATH, logEvent } from "./logger.mjs";
 import { getDiscordClient, getPendingVerifications } from "./discordBot.mjs";
 import { IDENTITIES_FILE_PATH } from "./identityTracker.mjs";
 
+const ROLE_RANK = { moderator: 1, admin: 2, owner: 3 };
+
 function parseDashboardUsers() {
   if (!DASHBOARD_USERS) return null;
   const map = {};
   for (const pair of DASHBOARD_USERS.split(",")) {
     const trimmed = pair.trim();
     if (!trimmed) continue;
-    const sepIdx = trimmed.indexOf(":");
-    if (sepIdx === -1) continue;
-    const name = trimmed.slice(0, sepIdx).trim();
-    const pass = trimmed.slice(sepIdx + 1).trim();
-    if (name && pass) map[name] = pass;
+    const parts = trimmed.split(":").map((p) => p.trim());
+    const [name, pass, role] = parts;
+    if (name && pass) {
+      const normalizedRole = ROLE_RANK[role] ? role : "moderator";
+      map[name] = { password: pass, role: normalizedRole };
+    }
   }
   return Object.keys(map).length > 0 ? map : null;
 }
@@ -40,18 +43,31 @@ function requireDashboardAuth(req, res, next) {
   const username = separatorIndex === -1 ? decoded : decoded.slice(0, separatorIndex);
   const password = separatorIndex === -1 ? "" : decoded.slice(separatorIndex + 1);
 
-  if (dashboardUsers && dashboardUsers[username] && dashboardUsers[username] === password) {
+  if (dashboardUsers && dashboardUsers[username] && dashboardUsers[username].password === password) {
     req.dashboardUser = username;
+    req.dashboardRole = dashboardUsers[username].role;
     return next();
   }
 
   if (DASHBOARD_PASSWORD && password === DASHBOARD_PASSWORD) {
     req.dashboardUser = username || "shared";
+    req.dashboardRole = "owner"; // legacy shared password keeps full access
     return next();
   }
 
   res.set("WWW-Authenticate", 'Basic realm="Verification Dashboard"');
   return res.status(401).send("Invalid credentials.");
+}
+
+function requireRole(minRole) {
+  const minRank = ROLE_RANK[minRole] || 1;
+  return (req, res, next) => {
+    const rank = ROLE_RANK[req.dashboardRole] || 0;
+    if (rank < minRank) {
+      return res.status(403).send("You don't have permission to access this.");
+    }
+    next();
+  };
 }
 
 function readLogEntries(limit = 1000) {
@@ -139,6 +155,10 @@ function buildDailyStats(entries, days = 14) {
 }
 
 export function registerDashboardRoutes(app) {
+  app.get("/api/whoami", requireDashboardAuth, (req, res) => {
+    res.json({ user: req.dashboardUser, role: req.dashboardRole });
+  });
+
   app.get("/api/dashboard-data", requireDashboardAuth, async (_req, res) => {
     const entries = readLogEntries(1000);
 
@@ -249,7 +269,7 @@ export function registerDashboardRoutes(app) {
     });
   });
 
-  app.get("/api/export-csv", requireDashboardAuth, async (_req, res) => {
+  app.get("/api/export-csv", requireDashboardAuth, requireRole("admin"), async (_req, res) => {
     const entries = readLogEntries(5000).filter((e) =>
       RELEVANT_EVENT_TYPES.has(e.type),
     );
@@ -384,7 +404,7 @@ export function registerDashboardRoutes(app) {
     res.set("Content-Type", "text/html").send(COMPOSE_HTML);
   });
 
-  app.get("/api/audit-data", requireDashboardAuth, async (_req, res) => {
+  app.get("/api/audit-data", requireDashboardAuth, requireRole("admin"), async (_req, res) => {
     const entries = readLogEntries(1000);
 
     const feed = entries
@@ -423,11 +443,11 @@ export function registerDashboardRoutes(app) {
     res.json({ feed: enrichedFeed });
   });
 
-  app.get("/audit-log", requireDashboardAuth, (_req, res) => {
+  app.get("/audit-log", requireDashboardAuth, requireRole("admin"), (_req, res) => {
     res.set("Content-Type", "text/html").send(AUDIT_HTML);
   });
 
-  app.get("/api/backup/logs", requireDashboardAuth, (_req, res) => {
+  app.get("/api/backup/logs", requireDashboardAuth, requireRole("owner"), (_req, res) => {
     if (!fs.existsSync(LOG_FILE_PATH)) {
       return res.status(404).send("No log file found yet.");
     }
@@ -442,7 +462,7 @@ export function registerDashboardRoutes(app) {
     );
   });
 
-  app.get("/api/backup/identities", requireDashboardAuth, (_req, res) => {
+  app.get("/api/backup/identities", requireDashboardAuth, requireRole("owner"), (_req, res) => {
     if (!fs.existsSync(IDENTITIES_FILE_PATH)) {
       return res.status(404).send("No identity database found yet.");
     }
@@ -835,7 +855,8 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 </head>
 <body>
   <h1>Verification Dashboard</h1>
-  <div style="margin-bottom: 16px; font-size: 13px;"><a href="/compose" style="color: #8fa2ff; text-decoration: none; margin-right: 16px;">Send a message &rarr;</a><a href="/audit-log" style="color: #8fa2ff; text-decoration: none; margin-right: 16px;">Audit log &rarr;</a><a href="/api/export-csv" style="color: #8fa2ff; text-decoration: none; margin-right: 16px;">Export CSV &darr;</a><a href="/api/backup/logs" style="color: #8fa2ff; text-decoration: none; margin-right: 16px;">Backup logs &darr;</a><a href="/api/backup/identities" style="color: #8fa2ff; text-decoration: none;">Backup ID DB &darr;</a></div>
+  <div style="margin-bottom: 16px; font-size: 13px;"><a href="/compose" style="color: #8fa2ff; text-decoration: none; margin-right: 16px;">Send a message &rarr;</a><a id="nav-audit-log" href="/audit-log" style="color: #8fa2ff; text-decoration: none; margin-right: 16px; display: none;">Audit log &rarr;</a><a id="nav-export-csv" href="/api/export-csv" style="color: #8fa2ff; text-decoration: none; margin-right: 16px; display: none;">Export CSV &darr;</a><a id="nav-backup-logs" href="/api/backup/logs" style="color: #8fa2ff; text-decoration: none; margin-right: 16px; display: none;">Backup logs &darr;</a><a id="nav-backup-identities" href="/api/backup/identities" style="color: #8fa2ff; text-decoration: none; display: none;">Backup ID DB &darr;</a></div>
+  <div id="role-label" style="font-size: 12px; color: #6b7180; margin-bottom: 16px;"></div>
   <div id="updated">Loading...</div>
 
   <div class="stats">
@@ -1031,10 +1052,36 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       }
     }
 
+    async function applyRole() {
+      try {
+        const res = await fetch("/api/whoami", { credentials: "same-origin" });
+        if (!res.ok) return;
+        const data = await res.json();
+
+        document.getElementById("role-label").textContent =
+          "Logged in as " + data.user + " (" + data.role + ")";
+
+        const rank = { moderator: 1, admin: 2, owner: 3 };
+        const myRank = rank[data.role] || 0;
+
+        if (myRank >= rank.admin) {
+          document.getElementById("nav-audit-log").style.display = "inline";
+          document.getElementById("nav-export-csv").style.display = "inline";
+        }
+        if (myRank >= rank.owner) {
+          document.getElementById("nav-backup-logs").style.display = "inline";
+          document.getElementById("nav-backup-identities").style.display = "inline";
+        }
+      } catch (err) {
+        console.error("Failed to load role info", err);
+      }
+    }
+
     document.getElementById("search").addEventListener("input", (e) => {
       renderFeed(e.target.value);
     });
 
+    applyRole();
     refresh();
     setInterval(refresh, 5000);
   </script>
