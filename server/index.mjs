@@ -15,7 +15,7 @@ import {
 } from "./src/discordBot.mjs";
 import { resolveShortUrl } from "./src/urlShortener.mjs";
 import { registerDashboardRoutes } from "./src/dashboard.mjs";
-import { checkAndRecordNullifier } from "./src/identityTracker.mjs";
+import { checkAndRecordNullifier, scheduleAutoBackup } from "./src/identityTracker.mjs";
 
 const app = express();
 app.use(bodyParser.json());
@@ -28,6 +28,16 @@ app.get("/", (_req, res) => {
     message: "Self Express Backend + Discord verifier bot (offchain)",
     verifyEndpoint: "/api/verify",
     endpoint: SELF_ENDPOINT,
+  });
+});
+
+// Public, unauthenticated health check for external uptime monitors
+// (e.g. UptimeRobot). Intentionally returns no sensitive data.
+app.get("/status", (_req, res) => {
+  res.json({
+    status: "ok",
+    uptimeSeconds: Math.round(process.uptime()),
+    timestamp: new Date().toISOString(),
   });
 });
 
@@ -323,9 +333,10 @@ app.post("/api/verify", async (req, res) => {
   }
 });
 
-app.listen(PORT, "0.0.0.0", () => {
+app.listen(PORT, () => {
   console.log(`Self Express Backend listening on http://localhost:${PORT}`);
   console.log(`Expected verify endpoint (SELF_ENDPOINT): ${SELF_ENDPOINT}`);
+  scheduleAutoBackup();
   startDiscordBot().catch((error) => {
     logEvent("discord.start_error", "Failed to start Discord bot", {
       error: error instanceof Error ? error.message : String(error),
