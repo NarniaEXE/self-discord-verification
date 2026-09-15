@@ -1,4 +1,6 @@
 import fs from "node:fs";
+import crypto from "node:crypto";
+import express from "express";
 
 import { DASHBOARD_PASSWORD, DASHBOARD_USERS, DISCORD_GUILD_ID } from "./config.mjs";
 import { LOG_FILE_PATH, logEvent } from "./logger.mjs";
@@ -6,6 +8,9 @@ import { getDiscordClient, getPendingVerifications } from "./discordBot.mjs";
 import { IDENTITIES_FILE_PATH } from "./identityTracker.mjs";
 
 const ROLE_RANK = { moderator: 1, admin: 2, owner: 3 };
+const SESSION_COOKIE_NAME = "dashboard_session";
+const SESSION_DURATION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const sessions = new Map(); // token -> { user, role, expiresAt }
 
 function parseDashboardUsers() {
   if (!DASHBOARD_USERS) return null;
@@ -25,6 +30,63 @@ function parseDashboardUsers() {
 
 const dashboardUsers = parseDashboardUsers();
 
+function checkCredentials(username, password) {
+  if (dashboardUsers && dashboardUsers[username] && dashboardUsers[username].password === password) {
+    return { user: username, role: dashboardUsers[username].role };
+  }
+  if (DASHBOARD_PASSWORD && password === DASHBOARD_PASSWORD) {
+    return { user: username || "shared", role: "owner" };
+  }
+  return null;
+}
+
+function parseCookies(req) {
+  const header = req.headers.cookie;
+  if (!header) return {};
+  const result = {};
+  for (const part of header.split(";")) {
+    const idx = part.indexOf("=");
+    if (idx === -1) continue;
+    const key = part.slice(0, idx).trim();
+    const value = part.slice(idx + 1).trim();
+    result[key] = decodeURIComponent(value);
+  }
+  return result;
+}
+
+function createSession(user, role) {
+  const token = crypto.randomBytes(32).toString("hex");
+  sessions.set(token, { user, role, expiresAt: Date.now() + SESSION_DURATION_MS });
+  return token;
+}
+
+function getSession(req) {
+  const cookies = parseCookies(req);
+  const token = cookies[SESSION_COOKIE_NAME];
+  if (!token) return null;
+  const session = sessions.get(token);
+  if (!session) return null;
+  if (Date.now() > session.expiresAt) {
+    sessions.delete(token);
+    return null;
+  }
+  return session;
+}
+
+function setSessionCookie(res, token) {
+  const maxAgeSeconds = Math.floor(SESSION_DURATION_MS / 1000);
+  res.set(
+    "Set-Cookie",
+    `${SESSION_COOKIE_NAME}=${token}; HttpOnly; Path=/; Max-Age=${maxAgeSeconds}; SameSite=Lax`,
+  );
+}
+
+function clearSessionCookie(res) {
+  res.set("Set-Cookie", `${SESSION_COOKIE_NAME}=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax`);
+}
+
+// For JSON/API routes: accepts a session cookie OR Basic Auth (handy for
+// scripts/curl), always responds with JSON on failure.
 function requireDashboardAuth(req, res, next) {
   if (!DASHBOARD_PASSWORD && !dashboardUsers) {
     return res
@@ -32,31 +94,46 @@ function requireDashboardAuth(req, res, next) {
       .send("Dashboard is not configured. Set DASHBOARD_PASSWORD to enable it.");
   }
 
+  const session = getSession(req);
+  if (session) {
+    req.dashboardUser = session.user;
+    req.dashboardRole = session.role;
+    return next();
+  }
+
   const auth = req.headers.authorization;
-  if (!auth || !auth.startsWith("Basic ")) {
-    res.set("WWW-Authenticate", 'Basic realm="Verification Dashboard"');
-    return res.status(401).send("Authentication required.");
+  if (auth && auth.startsWith("Basic ")) {
+    const decoded = Buffer.from(auth.slice(6), "base64").toString("utf8");
+    const separatorIndex = decoded.indexOf(":");
+    const username = separatorIndex === -1 ? decoded : decoded.slice(0, separatorIndex);
+    const password = separatorIndex === -1 ? "" : decoded.slice(separatorIndex + 1);
+    const result = checkCredentials(username, password);
+    if (result) {
+      req.dashboardUser = result.user;
+      req.dashboardRole = result.role;
+      return next();
+    }
   }
 
-  const decoded = Buffer.from(auth.slice(6), "base64").toString("utf8");
-  const separatorIndex = decoded.indexOf(":");
-  const username = separatorIndex === -1 ? decoded : decoded.slice(0, separatorIndex);
-  const password = separatorIndex === -1 ? "" : decoded.slice(separatorIndex + 1);
+  return res.status(401).json({ error: "Not authenticated." });
+}
 
-  if (dashboardUsers && dashboardUsers[username] && dashboardUsers[username].password === password) {
-    req.dashboardUser = username;
-    req.dashboardRole = dashboardUsers[username].role;
+// For HTML page routes: redirects to the login page instead of a JSON 401.
+function requirePageAuth(req, res, next) {
+  if (!DASHBOARD_PASSWORD && !dashboardUsers) {
+    return res
+      .status(404)
+      .send("Dashboard is not configured. Set DASHBOARD_PASSWORD to enable it.");
+  }
+
+  const session = getSession(req);
+  if (session) {
+    req.dashboardUser = session.user;
+    req.dashboardRole = session.role;
     return next();
   }
 
-  if (DASHBOARD_PASSWORD && password === DASHBOARD_PASSWORD) {
-    req.dashboardUser = username || "shared";
-    req.dashboardRole = "owner"; // legacy shared password keeps full access
-    return next();
-  }
-
-  res.set("WWW-Authenticate", 'Basic realm="Verification Dashboard"');
-  return res.status(401).send("Invalid credentials.");
+  res.redirect("/login?next=" + encodeURIComponent(req.originalUrl));
 }
 
 function requireRole(minRole) {
@@ -155,6 +232,62 @@ function buildDailyStats(entries, days = 14) {
 }
 
 export function registerDashboardRoutes(app) {
+  app.get("/login", (req, res) => {
+    if (!DASHBOARD_PASSWORD && !dashboardUsers) {
+      return res
+        .status(404)
+        .send("Dashboard is not configured. Set DASHBOARD_PASSWORD to enable it.");
+    }
+
+    const existingSession = getSession(req);
+    if (existingSession) {
+      return res.redirect("/dashboard");
+    }
+
+    const error = req.query.error === "1";
+    const next = typeof req.query.next === "string" ? req.query.next : "/dashboard";
+    res.set("Content-Type", "text/html").send(buildLoginHtml({ error, next }));
+  });
+
+  app.post(
+    "/login",
+    express.urlencoded({ extended: false }),
+    (req, res) => {
+      if (!DASHBOARD_PASSWORD && !dashboardUsers) {
+        return res.status(404).send("Dashboard is not configured.");
+      }
+
+      const { username, password } = req.body || {};
+      const nextPath =
+        typeof req.body?.next === "string" && req.body.next.startsWith("/")
+          ? req.body.next
+          : "/dashboard";
+
+      const result = checkCredentials(username, password);
+      if (!result) {
+        return res.redirect(
+          "/login?error=1&next=" + encodeURIComponent(nextPath),
+        );
+      }
+
+      const token = createSession(result.user, result.role);
+      setSessionCookie(res, token);
+      logEvent("dashboard.login", "Staff logged into the dashboard", {
+        user: result.user,
+        role: result.role,
+      });
+      res.redirect(nextPath);
+    },
+  );
+
+  app.get("/logout", (req, res) => {
+    const cookies = parseCookies(req);
+    const token = cookies[SESSION_COOKIE_NAME];
+    if (token) sessions.delete(token);
+    clearSessionCookie(res);
+    res.redirect("/login");
+  });
+
   app.get("/api/whoami", requireDashboardAuth, (req, res) => {
     res.json({ user: req.dashboardUser, role: req.dashboardRole });
   });
@@ -327,7 +460,7 @@ export function registerDashboardRoutes(app) {
     res.send(csv);
   });
 
-  app.get("/dashboard", requireDashboardAuth, (_req, res) => {
+  app.get("/dashboard", requirePageAuth, (_req, res) => {
     res.set("Content-Type", "text/html").send(DASHBOARD_HTML);
   });
 
@@ -400,7 +533,7 @@ export function registerDashboardRoutes(app) {
     }
   });
 
-  app.get("/compose", requireDashboardAuth, (_req, res) => {
+  app.get("/compose", requirePageAuth, (_req, res) => {
     res.set("Content-Type", "text/html").send(COMPOSE_HTML);
   });
 
@@ -443,7 +576,7 @@ export function registerDashboardRoutes(app) {
     res.json({ feed: enrichedFeed });
   });
 
-  app.get("/audit-log", requireDashboardAuth, requireRole("admin"), (_req, res) => {
+  app.get("/audit-log", requirePageAuth, requireRole("admin"), (_req, res) => {
     res.set("Content-Type", "text/html").send(AUDIT_HTML);
   });
 
@@ -521,7 +654,7 @@ const AUDIT_HTML = `<!DOCTYPE html>
 </head>
 <body>
   <h1>Audit Log</h1>
-  <div class="nav"><a href="/dashboard">&larr; Dashboard</a><a href="/compose">Send a message &rarr;</a></div>
+  <div class="nav"><a href="/dashboard">&larr; Dashboard</a><a href="/compose">Send a message &rarr;</a><a href="/logout" style="color: #f2545b; margin-left: 16px;">Log out</a></div>
   <div id="updated">Loading...</div>
 
   <input id="search" type="text" placeholder="Search by name, channel, or message..." />
@@ -669,7 +802,7 @@ const COMPOSE_HTML = `<!DOCTYPE html>
 </head>
 <body>
   <h1>Send Message</h1>
-  <div class="nav"><a href="/dashboard">&larr; Back to dashboard</a> <a href="/audit-log" style="margin-left: 16px;">Audit log &rarr;</a></div>
+  <div class="nav"><a href="/dashboard">&larr; Back to dashboard</a> <a href="/audit-log" style="margin-left: 16px;">Audit log &rarr;</a> <a href="/logout" style="margin-left: 16px; color: #f2545b;">Log out</a></div>
 
   <label for="sender-name">Your Name (for the audit log)</label>
   <input id="sender-name" type="text" placeholder="e.g. Jay" style="width: 100%; padding: 10px 12px; background: #171a21; border: 1px solid #262a33; border-radius: 8px; color: #e6e8eb; font-size: 14px;" />
@@ -775,6 +908,111 @@ const COMPOSE_HTML = `<!DOCTYPE html>
 </html>
 `;
 
+function buildLoginHtml({ error, next }) {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sign in - Verification Dashboard</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: radial-gradient(circle at top, #171a21 0%, #0f1115 60%);
+    color: #e6e8eb;
+    padding: 24px;
+  }
+  .card {
+    width: 100%;
+    max-width: 360px;
+    background: #171a21;
+    border: 1px solid #262a33;
+    border-radius: 14px;
+    padding: 32px 28px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+  }
+  .card h1 {
+    font-size: 18px;
+    margin: 0 0 4px;
+    color: #fff;
+    text-align: center;
+  }
+  .card p.subtitle {
+    font-size: 13px;
+    color: #6b7180;
+    text-align: center;
+    margin: 0 0 24px;
+  }
+  label {
+    display: block;
+    font-size: 11px;
+    color: #9aa0aa;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 6px;
+  }
+  input[type="text"], input[type="password"] {
+    width: 100%;
+    padding: 11px 12px;
+    margin-bottom: 18px;
+    background: #0f1115;
+    border: 1px solid #262a33;
+    border-radius: 8px;
+    color: #e6e8eb;
+    font-size: 14px;
+  }
+  input[type="text"]:focus, input[type="password"]:focus {
+    outline: none;
+    border-color: #8fa2ff;
+  }
+  button {
+    width: 100%;
+    padding: 12px;
+    background: #3ecf8e;
+    color: #0f1115;
+    border: none;
+    border-radius: 8px;
+    font-weight: 700;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  button:hover { background: #34b87d; }
+  .error {
+    background: rgba(242,84,91,0.12);
+    color: #f2545b;
+    font-size: 13px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    margin-bottom: 18px;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>🔐 Verification Dashboard</h1>
+    <p class="subtitle">Sign in with your staff credentials</p>
+    ${error ? '<div class="error">Invalid username or password.</div>' : ""}
+    <form method="POST" action="/login">
+      <input type="hidden" name="next" value="${next}">
+      <label for="username">Username</label>
+      <input type="text" id="username" name="username" autocomplete="username" required autofocus>
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" autocomplete="current-password" required>
+      <button type="submit">Sign in</button>
+    </form>
+  </div>
+</body>
+</html>
+`;
+}
+
 const DASHBOARD_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -857,6 +1095,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   <h1>Verification Dashboard</h1>
   <div style="margin-bottom: 16px; font-size: 13px;"><a href="/compose" style="color: #8fa2ff; text-decoration: none; margin-right: 16px;">Send a message &rarr;</a><a id="nav-audit-log" href="/audit-log" style="color: #8fa2ff; text-decoration: none; margin-right: 16px; display: none;">Audit log &rarr;</a><a id="nav-export-csv" href="/api/export-csv" style="color: #8fa2ff; text-decoration: none; margin-right: 16px; display: none;">Export CSV &darr;</a><a id="nav-backup-logs" href="/api/backup/logs" style="color: #8fa2ff; text-decoration: none; margin-right: 16px; display: none;">Backup logs &darr;</a><a id="nav-backup-identities" href="/api/backup/identities" style="color: #8fa2ff; text-decoration: none; display: none;">Backup ID DB &darr;</a></div>
   <div id="role-label" style="font-size: 12px; color: #6b7180; margin-bottom: 16px;"></div>
+  <div style="margin-bottom: 16px;"><a href="/logout" style="color: #f2545b; text-decoration: none; font-size: 12px;">Log out</a></div>
   <div id="updated">Loading...</div>
 
   <div class="stats">
