@@ -15,6 +15,8 @@ export const DISCORD_VERIFIED_ROLE_ID = process.env.DISCORD_VERIFIED_ROLE_ID;
 export const DISCORD_LOG_CHANNEL_ID = process.env.DISCORD_LOG_CHANNEL_ID;
 export const DISCORD_ALERTS_CHANNEL_ID = process.env.DISCORD_ALERTS_CHANNEL_ID;
 export const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD;
+export const DASHBOARD_USERS = process.env.DASHBOARD_USERS;
+export const DISCORD_ADMIN_USER_ID = process.env.DISCORD_ADMIN_USER_ID;
 export const LOG_DIR = process.env.LOG_DIR;
 
 export const SELF_APP_NAME =
