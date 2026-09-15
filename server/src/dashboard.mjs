@@ -1,11 +1,29 @@
 import fs from "node:fs";
 
-import { DASHBOARD_PASSWORD, DISCORD_GUILD_ID } from "./config.mjs";
+import { DASHBOARD_PASSWORD, DASHBOARD_USERS, DISCORD_GUILD_ID } from "./config.mjs";
 import { LOG_FILE_PATH, logEvent } from "./logger.mjs";
-import { getDiscordClient } from "./discordBot.mjs";
+import { getDiscordClient, getPendingVerifications } from "./discordBot.mjs";
+import { IDENTITIES_FILE_PATH } from "./identityTracker.mjs";
+
+function parseDashboardUsers() {
+  if (!DASHBOARD_USERS) return null;
+  const map = {};
+  for (const pair of DASHBOARD_USERS.split(",")) {
+    const trimmed = pair.trim();
+    if (!trimmed) continue;
+    const sepIdx = trimmed.indexOf(":");
+    if (sepIdx === -1) continue;
+    const name = trimmed.slice(0, sepIdx).trim();
+    const pass = trimmed.slice(sepIdx + 1).trim();
+    if (name && pass) map[name] = pass;
+  }
+  return Object.keys(map).length > 0 ? map : null;
+}
+
+const dashboardUsers = parseDashboardUsers();
 
 function requireDashboardAuth(req, res, next) {
-  if (!DASHBOARD_PASSWORD) {
+  if (!DASHBOARD_PASSWORD && !dashboardUsers) {
     return res
       .status(404)
       .send("Dashboard is not configured. Set DASHBOARD_PASSWORD to enable it.");
@@ -19,14 +37,21 @@ function requireDashboardAuth(req, res, next) {
 
   const decoded = Buffer.from(auth.slice(6), "base64").toString("utf8");
   const separatorIndex = decoded.indexOf(":");
+  const username = separatorIndex === -1 ? decoded : decoded.slice(0, separatorIndex);
   const password = separatorIndex === -1 ? "" : decoded.slice(separatorIndex + 1);
 
-  if (password !== DASHBOARD_PASSWORD) {
-    res.set("WWW-Authenticate", 'Basic realm="Verification Dashboard"');
-    return res.status(401).send("Invalid credentials.");
+  if (dashboardUsers && dashboardUsers[username] && dashboardUsers[username] === password) {
+    req.dashboardUser = username;
+    return next();
   }
 
-  next();
+  if (DASHBOARD_PASSWORD && password === DASHBOARD_PASSWORD) {
+    req.dashboardUser = username || "shared";
+    return next();
+  }
+
+  res.set("WWW-Authenticate", 'Basic realm="Verification Dashboard"');
+  return res.status(401).send("Invalid credentials.");
 }
 
 function readLogEntries(limit = 1000) {
@@ -134,6 +159,10 @@ export function registerDashboardRoutes(app) {
         ? Math.round((succeeded / (succeeded + failed)) * 1000) / 10
         : null;
 
+    const duplicates = entries.filter(
+      (e) => e.type === "verification.duplicate_identity",
+    ).length;
+
     let underage = 0;
     let ofac = 0;
     let otherFailure = 0;
@@ -144,6 +173,43 @@ export function registerDashboardRoutes(app) {
     }
 
     const daily = buildDailyStats(entries, 14);
+
+    const now = Date.now();
+    const oneWeekMs = 7 * 24 * 60 * 60 * 1000;
+    const thisWeekStart = now - oneWeekMs;
+    const lastWeekStart = now - 2 * oneWeekMs;
+
+    function countInWindow(type, from, to) {
+      return entries.filter((e) => {
+        if (e.type !== type) return false;
+        const t = new Date(e.timestamp).getTime();
+        return t >= from && t < to;
+      }).length;
+    }
+
+    const weekComparison = {
+      thisWeek: {
+        succeeded: countInWindow("verification.succeeded", thisWeekStart, now),
+        failed: countInWindow("verification.failed", thisWeekStart, now),
+      },
+      lastWeek: {
+        succeeded: countInWindow("verification.succeeded", lastWeekStart, thisWeekStart),
+        failed: countInWindow("verification.failed", lastWeekStart, thisWeekStart),
+      },
+    };
+
+    const pendingSessions = getPendingVerifications();
+    const pendingNow = pendingSessions.length;
+    const oldestPendingMinutes =
+      pendingNow > 0
+        ? Math.round(
+            (Date.now() - Math.min(...pendingSessions.map((s) => s.createdAt))) / 60000,
+          )
+        : null;
+
+    const droppedOff = Math.max(0, started - succeeded - failed - errors - duplicates);
+    const dropOffRate =
+      started > 0 ? Math.round((droppedOff / started) * 1000) / 10 : null;
 
     const feed = entries
       .filter((e) => RELEVANT_EVENT_TYPES.has(e.type))
@@ -164,11 +230,81 @@ export function registerDashboardRoutes(app) {
     }));
 
     res.json({
-      stats: { started, succeeded, failed, successRate },
+      stats: {
+        started,
+        succeeded,
+        failed,
+        errors,
+        duplicates,
+        successRate,
+        pendingNow,
+        oldestPendingMinutes,
+        droppedOff,
+        dropOffRate,
+      },
       failureBreakdown: { underage, ofac, other: otherFailure },
+      weekComparison,
       daily,
       feed: enrichedFeed,
     });
+  });
+
+  app.get("/api/export-csv", requireDashboardAuth, async (_req, res) => {
+    const entries = readLogEntries(5000).filter((e) =>
+      RELEVANT_EVENT_TYPES.has(e.type),
+    );
+
+    const uniqueIds = [
+      ...new Set(entries.map((e) => e.discordUserId).filter(Boolean)),
+    ];
+    const usernames = {};
+    await Promise.all(
+      uniqueIds.map(async (id) => {
+        usernames[id] = await resolveUsername(id);
+      }),
+    );
+
+    const header = [
+      "timestamp",
+      "type",
+      "discord_user_id",
+      "username",
+      "message",
+      "is_minimum_age_valid",
+      "is_ofac_valid",
+    ];
+
+    const csvEscape = (value) => {
+      if (value === null || value === undefined) return "";
+      const str = String(value);
+      if (str.includes(",") || str.includes('"') || str.includes("\n")) {
+        return `"${str.replace(/"/g, '""')}"`;
+      }
+      return str;
+    };
+
+    const rows = entries.map((e) =>
+      [
+        e.timestamp,
+        e.type,
+        e.discordUserId || "",
+        e.discordUserId ? usernames[e.discordUserId] || "" : "",
+        e.message || "",
+        e.isMinimumAgeValid === undefined ? "" : e.isMinimumAgeValid,
+        e.isOfacValid === undefined ? "" : e.isOfacValid,
+      ]
+        .map(csvEscape)
+        .join(","),
+    );
+
+    const csv = [header.join(","), ...rows].join("\n");
+
+    res.set("Content-Type", "text/csv");
+    res.set(
+      "Content-Disposition",
+      `attachment; filename="verification-log-${new Date().toISOString().slice(0, 10)}.csv"`,
+    );
+    res.send(csv);
   });
 
   app.get("/dashboard", requireDashboardAuth, (_req, res) => {
@@ -206,7 +342,12 @@ export function registerDashboardRoutes(app) {
       return res.status(400).json({ error: "channelId and message are required." });
     }
 
-    if (!senderName || !senderName.trim()) {
+    const effectiveSenderName =
+      req.dashboardUser && req.dashboardUser !== "shared"
+        ? req.dashboardUser
+        : senderName && senderName.trim();
+
+    if (!effectiveSenderName) {
       return res.status(400).json({ error: "Please enter your name for the audit log." });
     }
 
@@ -226,7 +367,7 @@ export function registerDashboardRoutes(app) {
       logEvent("dashboard.message_sent", "Message sent via dashboard compose", {
         channelId,
         channelName: channel.name,
-        senderName: senderName.trim(),
+        senderName: effectiveSenderName,
         message,
       });
 
@@ -284,6 +425,36 @@ export function registerDashboardRoutes(app) {
 
   app.get("/audit-log", requireDashboardAuth, (_req, res) => {
     res.set("Content-Type", "text/html").send(AUDIT_HTML);
+  });
+
+  app.get("/api/backup/logs", requireDashboardAuth, (_req, res) => {
+    if (!fs.existsSync(LOG_FILE_PATH)) {
+      return res.status(404).send("No log file found yet.");
+    }
+
+    logEvent("dashboard.backup_downloaded", "Staff downloaded a log backup", {
+      file: "logs",
+    });
+
+    res.download(
+      LOG_FILE_PATH,
+      `verification-logs-${new Date().toISOString().slice(0, 10)}.log`,
+    );
+  });
+
+  app.get("/api/backup/identities", requireDashboardAuth, (_req, res) => {
+    if (!fs.existsSync(IDENTITIES_FILE_PATH)) {
+      return res.status(404).send("No identity database found yet.");
+    }
+
+    logEvent("dashboard.backup_downloaded", "Staff downloaded an identity DB backup", {
+      file: "identities",
+    });
+
+    res.download(
+      IDENTITIES_FILE_PATH,
+      `verified-identities-${new Date().toISOString().slice(0, 10)}.json`,
+    );
   });
 }
 
@@ -389,10 +560,13 @@ const AUDIT_HTML = `<!DOCTYPE html>
         const info = badgeInfo(entry.type);
         const where = entry.channelName ? "#" + entry.channelName : (entry.existingUserId ? "vs <@" + entry.existingUserId + ">" : "-");
         const content = entry.message || entry.reason || entry.message === "" ? (entry.message || "") : "-";
+        const actorCell = entry.actorId
+          ? '<a href="https://discord.com/users/' + entry.actorId + '" target="_blank" style="color: #8fa2ff; text-decoration: none;">' + (entry.actorName || entry.actorId) + "</a>"
+          : (entry.actorName || "-");
         tr.innerHTML =
           "<td>" + formatTime(entry.timestamp) + "</td>" +
           '<td><span class="badge ' + info.cls + '">' + info.label + "</span></td>" +
-          "<td>" + (entry.actorName || "-") + "</td>" +
+          "<td>" + actorCell + "</td>" +
           "<td>" + where + "</td>" +
           '<td class="muted">' + content + "</td>";
         tbody.appendChild(tr);
@@ -619,7 +793,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .stat-card.rate .value { color: #8fa2ff; }
   .panels {
     display: grid;
-    grid-template-columns: 2fr 1fr;
+    grid-template-columns: 2fr 1fr 1fr;
     gap: 16px;
     margin-bottom: 20px;
   }
@@ -661,7 +835,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 </head>
 <body>
   <h1>Verification Dashboard</h1>
-  <div style="margin-bottom: 16px; font-size: 13px;"><a href="/compose" style="color: #8fa2ff; text-decoration: none; margin-right: 16px;">Send a message &rarr;</a><a href="/audit-log" style="color: #8fa2ff; text-decoration: none;">Audit log &rarr;</a></div>
+  <div style="margin-bottom: 16px; font-size: 13px;"><a href="/compose" style="color: #8fa2ff; text-decoration: none; margin-right: 16px;">Send a message &rarr;</a><a href="/audit-log" style="color: #8fa2ff; text-decoration: none; margin-right: 16px;">Audit log &rarr;</a><a href="/api/export-csv" style="color: #8fa2ff; text-decoration: none; margin-right: 16px;">Export CSV &darr;</a><a href="/api/backup/logs" style="color: #8fa2ff; text-decoration: none; margin-right: 16px;">Backup logs &darr;</a><a href="/api/backup/identities" style="color: #8fa2ff; text-decoration: none;">Backup ID DB &darr;</a></div>
   <div id="updated">Loading...</div>
 
   <div class="stats">
@@ -681,7 +855,16 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       <div class="label">Success Rate</div>
       <div class="value" id="stat-rate">-</div>
     </div>
+    <div class="stat-card pending">
+      <div class="label">Pending Now</div>
+      <div class="value" id="stat-pending-now">-</div>
+    </div>
+    <div class="stat-card fail">
+      <div class="label">Never Finished</div>
+      <div class="value" id="stat-dropoff">-</div>
+    </div>
   </div>
+  <div id="pending-note" class="muted" style="font-size: 12px; margin-top: -12px; margin-bottom: 20px;"></div>
 
   <div class="panels">
     <div class="panel">
@@ -693,6 +876,13 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       <div class="breakdown-row"><span>Under 18</span><span id="breakdown-underage">-</span></div>
       <div class="breakdown-row"><span>OFAC match</span><span id="breakdown-ofac">-</span></div>
       <div class="breakdown-row"><span>Other</span><span id="breakdown-other">-</span></div>
+    </div>
+    <div class="panel">
+      <h2>This Week vs Last Week</h2>
+      <div class="breakdown-row"><span>Succeeded (this week)</span><span id="week-succeeded-this">-</span></div>
+      <div class="breakdown-row"><span>Succeeded (last week)</span><span id="week-succeeded-last">-</span></div>
+      <div class="breakdown-row"><span>Failed (this week)</span><span id="week-failed-this">-</span></div>
+      <div class="breakdown-row"><span>Failed (last week)</span><span id="week-failed-last">-</span></div>
     </div>
   </div>
 
@@ -743,9 +933,11 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       for (const entry of filtered) {
         const tr = document.createElement("tr");
         const cls = badgeClass(entry.type);
-        const userLabel = entry.username
-          ? entry.username + " (" + entry.discordUserId + ")"
-          : (entry.discordUserId || "-");
+        const userLabel = entry.discordUserId
+          ? '<a href="https://discord.com/users/' + entry.discordUserId + '" target="_blank" style="color: #8fa2ff; text-decoration: none;">' +
+            (entry.username ? entry.username + " (" + entry.discordUserId + ")" : entry.discordUserId) +
+            "</a>"
+          : "-";
         tr.innerHTML =
           "<td>" + formatTime(entry.timestamp) + "</td>" +
           '<td><span class="badge ' + cls + '">' + entry.type + "</span></td>" +
@@ -804,9 +996,29 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         document.getElementById("stat-rate").textContent =
           data.stats.successRate === null ? "-" : data.stats.successRate + "%";
 
+        document.getElementById("stat-pending-now").textContent = data.stats.pendingNow;
+        document.getElementById("stat-dropoff").textContent =
+          data.stats.droppedOff +
+          (data.stats.dropOffRate !== null ? " (" + data.stats.dropOffRate + "%)" : "");
+
+        const pendingNoteEl = document.getElementById("pending-note");
+        if (data.stats.pendingNow > 0 && data.stats.oldestPendingMinutes !== null) {
+          pendingNoteEl.textContent =
+            "Oldest pending session started " + data.stats.oldestPendingMinutes + " min ago.";
+        } else {
+          pendingNoteEl.textContent = "";
+        }
+
         document.getElementById("breakdown-underage").textContent = data.failureBreakdown.underage;
         document.getElementById("breakdown-ofac").textContent = data.failureBreakdown.ofac;
         document.getElementById("breakdown-other").textContent = data.failureBreakdown.other;
+
+        if (data.weekComparison) {
+          document.getElementById("week-succeeded-this").textContent = data.weekComparison.thisWeek.succeeded;
+          document.getElementById("week-succeeded-last").textContent = data.weekComparison.lastWeek.succeeded;
+          document.getElementById("week-failed-this").textContent = data.weekComparison.thisWeek.failed;
+          document.getElementById("week-failed-last").textContent = data.weekComparison.lastWeek.failed;
+        }
 
         latestFeed = data.feed;
         renderFeed(document.getElementById("search").value);
