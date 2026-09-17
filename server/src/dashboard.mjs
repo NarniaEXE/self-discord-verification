@@ -617,45 +617,60 @@ const AUDIT_HTML = `<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Audit Log</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27%3E%3Ctext y=%27.9em%27 font-size=%2790%27%3E%F0%9F%94%90%3C/text%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
   * { box-sizing: border-box; }
   body {
     margin: 0;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    background: #0f1115;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: radial-gradient(circle at top, #171a21 0%, #0f1115 55%);
     color: #e6e8eb;
     padding: 24px;
   }
-  h1 { font-size: 20px; margin: 0 0 8px; color: #fff; }
+  h1 { font-size: 21px; margin: 0 0 8px; color: #fff; font-weight: 800; letter-spacing: -0.02em; }
   .nav { font-size: 13px; margin-bottom: 20px; }
-  .nav a { color: #8fa2ff; text-decoration: none; margin-right: 16px; }
+  .nav a { color: #8fa2ff; text-decoration: none; margin-right: 16px; transition: opacity 0.15s ease; }
+  .nav a:hover { opacity: 0.7; }
   #search {
     width: 100%;
-    padding: 8px 12px;
+    padding: 10px 13px;
     margin-bottom: 12px;
     background: #171a21;
     border: 1px solid #262a33;
-    border-radius: 8px;
+    border-radius: 10px;
     color: #e6e8eb;
     font-size: 13px;
+    transition: border-color 0.15s ease;
   }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #21242c; vertical-align: top; }
-  th { color: #9aa0aa; font-weight: 500; text-transform: uppercase; font-size: 11px; letter-spacing: 0.04em; }
-  tr:hover { background: #1c1f27; }
-  .badge { padding: 2px 8px; border-radius: 6px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+  #search:focus { outline: none; border-color: #8fa2ff; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    background: linear-gradient(145deg, #1a1d25, #14161c);
+    border: 1px solid #262a33;
+    border-radius: 14px;
+    overflow: hidden;
+  }
+  th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid #21242c; vertical-align: top; }
+  th { color: #9aa0aa; font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: 0.05em; }
+  tr:hover td { background: #1c1f27; }
+  .badge { padding: 3px 9px; border-radius: 6px; font-size: 12px; font-weight: 600; white-space: nowrap; }
   .badge.say { background: rgba(143,162,255,0.15); color: #8fa2ff; }
   .badge.compose { background: rgba(62,207,142,0.15); color: #3ecf8e; }
   .badge.setup { background: rgba(242,193,78,0.15); color: #f2c14e; }
   .badge.duplicate { background: rgba(242,84,91,0.15); color: #f2545b; }
   .muted { color: #6b7180; }
   #updated { font-size: 12px; color: #6b7180; margin-bottom: 16px; }
+  #updated.pulse { animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
 </style>
 </head>
 <body>
   <h1>Audit Log</h1>
   <div class="nav"><a href="/dashboard">&larr; Dashboard</a><a href="/compose">Send a message &rarr;</a><a href="/logout" style="color: #f2545b; margin-left: 16px;">Log out</a></div>
-  <div id="updated">Loading...</div>
+  <div id="updated" class="pulse">Loading...</div>
 
   <input id="search" type="text" placeholder="Search by name, channel, or message..." />
 
@@ -733,8 +748,9 @@ const AUDIT_HTML = `<!DOCTYPE html>
         const data = await res.json();
         latestFeed = data.feed;
         renderFeed(document.getElementById("search").value);
-        document.getElementById("updated").textContent =
-          "Last updated: " + new Date().toLocaleTimeString();
+        const updatedEl = document.getElementById("updated");
+        updatedEl.classList.remove("pulse");
+        updatedEl.textContent = "Last updated: " + new Date().toLocaleTimeString();
       } catch (err) {
         console.error("Failed to refresh audit log", err);
       }
@@ -757,42 +773,52 @@ const COMPOSE_HTML = `<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Send Message</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27%3E%3Ctext y=%27.9em%27 font-size=%2790%27%3E%F0%9F%94%90%3C/text%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
   * { box-sizing: border-box; }
   body {
     margin: 0;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    background: #0f1115;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: radial-gradient(circle at top, #171a21 0%, #0f1115 55%);
     color: #e6e8eb;
     padding: 24px;
     max-width: 560px;
   }
-  h1 { font-size: 20px; margin: 0 0 8px; color: #fff; }
+  h1 { font-size: 21px; margin: 0 0 8px; color: #fff; font-weight: 800; letter-spacing: -0.02em; }
   .nav { font-size: 13px; margin-bottom: 20px; }
-  .nav a { color: #8fa2ff; text-decoration: none; }
-  label { display: block; font-size: 12px; color: #9aa0aa; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; margin-top: 16px; }
-  select, textarea {
+  .nav a { color: #8fa2ff; text-decoration: none; transition: opacity 0.15s ease; }
+  .nav a:hover { opacity: 0.7; }
+  label { display: block; font-size: 11px; color: #9aa0aa; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; margin-bottom: 6px; margin-top: 18px; }
+  select, textarea, input[type="text"] {
     width: 100%;
-    padding: 10px 12px;
+    padding: 11px 13px;
     background: #171a21;
     border: 1px solid #262a33;
-    border-radius: 8px;
+    border-radius: 10px;
     color: #e6e8eb;
     font-size: 14px;
     font-family: inherit;
+    transition: border-color 0.15s ease;
+  }
+  select:focus, textarea:focus, input[type="text"]:focus {
+    outline: none;
+    border-color: #8fa2ff;
   }
   textarea { min-height: 120px; resize: vertical; }
   button {
-    margin-top: 18px;
-    padding: 10px 20px;
+    margin-top: 20px;
+    padding: 12px 22px;
     background: #3ecf8e;
     color: #0f1115;
     border: none;
-    border-radius: 8px;
+    border-radius: 10px;
     font-weight: 700;
     font-size: 14px;
     cursor: pointer;
+    transition: background 0.15s ease, transform 0.1s ease;
   }
+  button:hover:not(:disabled) { background: #34b87d; transform: translateY(-1px); }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
   #status { margin-top: 14px; font-size: 13px; }
   #status.success { color: #3ecf8e; }
@@ -915,6 +941,8 @@ function buildLoginHtml({ error, next }) {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Sign in - Verification Dashboard</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27%3E%3Ctext y=%27.9em%27 font-size=%2790%27%3E%F0%9F%94%90%3C/text%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
   * { box-sizing: border-box; }
   body {
@@ -923,7 +951,7 @@ function buildLoginHtml({ error, next }) {
     display: flex;
     align-items: center;
     justify-content: center;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     background: radial-gradient(circle at top, #171a21 0%, #0f1115 60%);
     color: #e6e8eb;
     padding: 24px;
@@ -1019,32 +1047,55 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Verification Dashboard</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27%3E%3Ctext y=%27.9em%27 font-size=%2790%27%3E%F0%9F%94%90%3C/text%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
 <style>
   * { box-sizing: border-box; }
   body {
     margin: 0;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     background: #0f1115;
     color: #e6e8eb;
     padding: 24px;
   }
-  h1 { font-size: 20px; margin: 0 0 20px; color: #fff; }
+  h1 {
+    font-size: 22px;
+    margin: 0 0 20px;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    background: linear-gradient(90deg, #fff, #8fa2ff);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    display: inline-block;
+  }
   .stats {
     display: flex;
     gap: 16px;
     margin-bottom: 20px;
     flex-wrap: wrap;
   }
-  .stat-card {
-    background: #171a21;
-    border: 1px solid #262a33;
-    border-radius: 10px;
-    padding: 16px 20px;
-    min-width: 130px;
+  @media (max-width: 500px) {
+    .stats { gap: 10px; }
+    .stat-card { flex: 1 1 calc(50% - 10px); min-width: 0; }
+    body { padding: 16px; }
   }
-  .stat-card .label { font-size: 11px; color: #9aa0aa; text-transform: uppercase; letter-spacing: 0.05em; }
-  .stat-card .value { font-size: 26px; font-weight: 700; margin-top: 4px; }
+  .stat-card {
+    background: linear-gradient(145deg, #1a1d25, #14161c);
+    border: 1px solid #262a33;
+    border-radius: 14px;
+    padding: 18px 22px;
+    min-width: 130px;
+    transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+  }
+  .stat-card:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+    border-color: #333844;
+  }
+  .stat-card .label { font-size: 11px; color: #9aa0aa; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; }
+  .stat-card .value { font-size: 28px; font-weight: 800; margin-top: 6px; letter-spacing: -0.02em; }
   .stat-card.success .value { color: #3ecf8e; }
   .stat-card.fail .value { color: #f2545b; }
   .stat-card.pending .value { color: #f2c14e; }
@@ -1059,13 +1110,14 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     .panels { grid-template-columns: 1fr; }
   }
   .panel {
-    background: #171a21;
+    background: linear-gradient(145deg, #1a1d25, #14161c);
     border: 1px solid #262a33;
-    border-radius: 10px;
-    padding: 16px 20px;
+    border-radius: 14px;
+    padding: 18px 22px;
   }
-  .panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: #9aa0aa; margin: 0 0 12px; }
-  .breakdown-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #21242c; font-size: 13px; }
+  .panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: #9aa0aa; margin: 0 0 14px; font-weight: 700; }
+  .breakdown-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #21242c; font-size: 13px; transition: opacity 0.15s ease; }
+  .breakdown-row:hover { opacity: 0.75; }
   .breakdown-row:last-child { border-bottom: none; }
   #search {
     width: 100%;
@@ -1088,6 +1140,8 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .badge.info { background: rgba(120,140,255,0.15); color: #8fa2ff; }
   .muted { color: #6b7180; }
   #updated { font-size: 12px; color: #6b7180; margin-bottom: 16px; }
+  #updated.pulse { animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
   canvas { max-height: 220px; }
 </style>
 </head>
@@ -1096,7 +1150,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   <div style="margin-bottom: 16px; font-size: 13px;"><a href="/compose" style="color: #8fa2ff; text-decoration: none; margin-right: 16px;">Send a message &rarr;</a><a id="nav-audit-log" href="/audit-log" style="color: #8fa2ff; text-decoration: none; margin-right: 16px; display: none;">Audit log &rarr;</a><a id="nav-export-csv" href="/api/export-csv" style="color: #8fa2ff; text-decoration: none; margin-right: 16px; display: none;">Export CSV &darr;</a><a id="nav-backup-logs" href="/api/backup/logs" style="color: #8fa2ff; text-decoration: none; margin-right: 16px; display: none;">Backup logs &darr;</a><a id="nav-backup-identities" href="/api/backup/identities" style="color: #8fa2ff; text-decoration: none; display: none;">Backup ID DB &darr;</a></div>
   <div id="role-label" style="font-size: 12px; color: #6b7180; margin-bottom: 16px;"></div>
   <div style="margin-bottom: 16px;"><a href="/logout" style="color: #f2545b; text-decoration: none; font-size: 12px;">Log out</a></div>
-  <div id="updated">Loading...</div>
+  <div id="updated" class="pulse">Loading...</div>
 
   <div class="stats">
     <div class="stat-card pending">
@@ -1208,6 +1262,11 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     }
 
     function renderChart(daily) {
+      if (typeof Chart === "undefined") {
+        console.warn("Chart.js failed to load; skipping chart render.");
+        return;
+      }
+
       const ctx = document.getElementById("daily-chart").getContext("2d");
       const labels = daily.map((d) => d.date.slice(5));
       const succeededData = daily.map((d) => d.succeeded);
@@ -1282,8 +1341,13 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 
         latestFeed = data.feed;
         renderFeed(document.getElementById("search").value);
-        renderChart(data.daily);
+        try {
+          renderChart(data.daily);
+        } catch (chartErr) {
+          console.error("Chart render failed", chartErr);
+        }
 
+        document.getElementById("updated").classList.remove("pulse");
         document.getElementById("updated").textContent =
           "Last updated: " + new Date().toLocaleTimeString();
       } catch (err) {
