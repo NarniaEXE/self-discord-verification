@@ -29,6 +29,7 @@ import {
   DISCORD_CLIENT_ID,
   DISCORD_GUILD_ID,
   DISCORD_VERIFIED_ROLE_ID,
+  DISCORD_REMOVE_ROLE_IDS,
   DISCORD_LOG_CHANNEL_ID,
   DISCORD_ALERTS_CHANNEL_ID,
   DISCORD_ADMIN_USER_ID,
@@ -190,8 +191,9 @@ async function sendAlertsChannelMessage(message) {
 async function dmAdmin(message) {
   if (!DISCORD_ADMIN_USER_ID || !discordClient) return;
   try {
-    const admin = await discordClient.users.fetch(DISCORD_ADMIN_USER_ID);
-    const dm = await admin.createDM();
+    const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID);
+    const member = await guild.members.fetch(DISCORD_ADMIN_USER_ID);
+    const dm = await member.createDM();
     await dm.send(message);
   } catch (err) {
     logEvent("discord.admin_dm_error", "Failed to DM the configured admin", {
@@ -223,8 +225,9 @@ function scheduleVerifyReminder(sessionId, discordUserId) {
     if (!discordClient) return;
 
     try {
-      const user = await discordClient.users.fetch(discordUserId);
-      const dm = await user.createDM();
+      const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID);
+      const member = await guild.members.fetch(discordUserId);
+      const dm = await member.createDM();
 
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
@@ -324,6 +327,37 @@ export async function handleDiscordVerificationSuccess(sessionId) {
           discordUserId,
           roleId: role.id,
         });
+      }
+    }
+
+    if (DISCORD_REMOVE_ROLE_IDS) {
+      const roleIdsToRemove = DISCORD_REMOVE_ROLE_IDS.split(",")
+        .map((id) => id.trim())
+        .filter(Boolean);
+
+      for (const roleId of roleIdsToRemove) {
+        try {
+          if (member.roles.cache.has(roleId)) {
+            await member.roles.remove(roleId);
+            logEvent("verification.role_removed", "Removed role after verification", {
+              guildId: guild.id,
+              discordUserId,
+              roleId,
+            });
+          }
+        } catch (removeError) {
+          logEvent(
+            "verification.role_remove_error",
+            "Failed to remove a configured role after verification",
+            {
+              guildId: guild.id,
+              discordUserId,
+              roleId,
+              error:
+                removeError instanceof Error ? removeError.message : String(removeError),
+            },
+          );
+        }
       }
     }
 
